@@ -1,0 +1,19 @@
+{
+  "name": "bidwave",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @bidwave/web run dev",
+    "dev:api": "npm --workspace @bidwave/api run dev",
+    "build:web": "npm --workspace @bidwave/web run build",
+    "build:api": "npm --workspace @bidwave/api run build",
+    "typecheck": "npm run typecheck --workspaces"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.15.0"
+  }
+}

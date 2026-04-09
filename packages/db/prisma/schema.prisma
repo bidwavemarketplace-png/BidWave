@@ -1,0 +1,374 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  buyer
+  seller
+  admin
+}
+
+enum SellerStatus {
+  pending_review
+  approved
+  rejected
+  paused
+}
+
+enum ShowStatus {
+  draft
+  scheduled
+  live
+  ended
+  cancelled
+}
+
+enum PricingMode {
+  auction
+  buy_now
+}
+
+enum AuctionStatus {
+  scheduled
+  live
+  ended
+  settled
+  cancelled
+}
+
+enum OrderStatus {
+  pending_payment
+  paid
+  fulfillment_pending
+  shipped
+  delivered
+  refunded
+  cancelled
+}
+
+enum BuyerBidReadinessStatus {
+  not_ready
+  ready
+  payment_retry_required
+  restricted
+}
+
+enum PaymentType {
+  lot
+  shipping
+}
+
+enum PaymentStatus {
+  pending
+  processing
+  succeeded
+  failed
+  refunded
+}
+
+enum ShipmentGroupStatus {
+  open
+  shipping_pending
+  shipping_paid
+  shipping_failed
+  fulfilled
+  cancelled
+}
+
+model User {
+  id                 String               @id @default(cuid())
+  email              String               @unique
+  displayName        String
+  avatarUrl          String?
+  role               UserRole             @default(buyer)
+  countryCode        String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  sellerProfile      SellerProfile?
+  buyerProfile       BuyerCheckoutProfile?
+  bids               Bid[]
+  buyerOrders        Order[]              @relation("BuyerOrders")
+  sellerOrders       Order[]              @relation("SellerOrders")
+  shippingAddresses  ShippingAddress[]
+  shipmentGroups     ShipmentGroup[]
+}
+
+model SellerProfile {
+  id               String               @id @default(cuid())
+  userId           String               @unique
+  storeName        String
+  bio              String?
+  status           SellerStatus         @default(pending_review)
+  riskLevel        String               @default("standard")
+  payoutHoldDays   Int                  @default(7)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  user             User                 @relation(fields: [userId], references: [id])
+  shows            Show[]
+  verifications    SellerVerification[]
+  payouts          Payout[]
+}
+
+model SellerVerification {
+  id                String         @id @default(cuid())
+  sellerProfileId   String
+  provider          String
+  providerReference String?
+  status            String
+  submittedAt       DateTime       @default(now())
+  reviewedAt        DateTime?
+  sellerProfile     SellerProfile  @relation(fields: [sellerProfileId], references: [id])
+}
+
+model Show {
+  id            String      @id @default(cuid())
+  sellerId      String
+  title         String
+  slug          String      @unique
+  description   String
+  status        ShowStatus  @default(draft)
+  scheduledFor  DateTime?
+  startedAt     DateTime?
+  endedAt       DateTime?
+  streamRoomId  String?
+  coverImageUrl String?
+  seller        SellerProfile @relation(fields: [sellerId], references: [id])
+  items         ShowItem[]
+  orders        Order[]
+  shipmentGroups ShipmentGroup[]
+  chatMessages  ChatMessage[]
+}
+
+model ShowItem {
+  id           String       @id @default(cuid())
+  showId       String
+  sellerId     String
+  title        String
+  description  String?
+  category     String
+  condition    String?
+  imageUrl     String?
+  pricingMode  PricingMode
+  buyNowPrice  Decimal?     @db.Decimal(10, 2)
+  currency     String
+  createdAt    DateTime     @default(now())
+  show         Show         @relation(fields: [showId], references: [id])
+  auction      Auction?
+  orderItems   OrderItem[]
+}
+
+model Auction {
+  id               String         @id @default(cuid())
+  showItemId       String         @unique
+  status           AuctionStatus  @default(scheduled)
+  startPrice       Decimal        @db.Decimal(10, 2)
+  reservePrice     Decimal?       @db.Decimal(10, 2)
+  minimumIncrement Decimal        @db.Decimal(10, 2)
+  startsAt         DateTime
+  endsAt           DateTime
+  extendedUntil    DateTime?
+  winnerUserId     String?
+  winningBidId     String?
+  showItem         ShowItem       @relation(fields: [showItemId], references: [id])
+  bids             Bid[]
+  settledOrderItem SettledLot?
+}
+
+model Bid {
+  id          String    @id @default(cuid())
+  auctionId   String
+  userId      String
+  amount      Decimal   @db.Decimal(10, 2)
+  status      String    @default("accepted")
+  placedAt    DateTime  @default(now())
+  clientNonce String
+  auction     Auction   @relation(fields: [auctionId], references: [id])
+  user        User      @relation(fields: [userId], references: [id])
+}
+
+model Order {
+  id                         String       @id @default(cuid())
+  buyerId                    String
+  sellerId                   String
+  showId                     String?
+  status                     OrderStatus  @default(pending_payment)
+  currency                   String
+  subtotalAmount             Decimal      @db.Decimal(10, 2)
+  platformFeeAmount          Decimal      @db.Decimal(10, 2)
+  paymentProcessingFeeAmount Decimal      @db.Decimal(10, 2)
+  shippingAmount             Decimal      @db.Decimal(10, 2)
+  taxAmount                  Decimal      @db.Decimal(10, 2)
+  totalAmount                Decimal      @db.Decimal(10, 2)
+  placedAt                   DateTime     @default(now())
+  buyer                      User         @relation("BuyerOrders", fields: [buyerId], references: [id])
+  seller                     User         @relation("SellerOrders", fields: [sellerId], references: [id])
+  show                       Show?        @relation(fields: [showId], references: [id])
+  items                      OrderItem[]
+  payments                   Payment[]
+  shipment                   Shipment?
+  shipmentGroupId            String?
+  shipmentGroup              ShipmentGroup? @relation(fields: [shipmentGroupId], references: [id])
+  disputes                   Dispute[]
+}
+
+model OrderItem {
+  id          String      @id @default(cuid())
+  orderId     String
+  showItemId  String
+  pricingMode PricingMode
+  unitAmount  Decimal     @db.Decimal(10, 2)
+  quantity    Int         @default(1)
+  order       Order       @relation(fields: [orderId], references: [id])
+  showItem    ShowItem    @relation(fields: [showItemId], references: [id])
+  settledLot  SettledLot?
+}
+
+model Payment {
+  id                String    @id @default(cuid())
+  orderId           String?
+  shipmentGroupId   String?
+  type              PaymentType
+  provider          String
+  providerPaymentId String?
+  status            PaymentStatus
+  authorizedAmount  Decimal?  @db.Decimal(10, 2)
+  capturedAmount    Decimal?  @db.Decimal(10, 2)
+  refundedAmount    Decimal?  @db.Decimal(10, 2)
+  createdAt         DateTime  @default(now())
+  order             Order?    @relation(fields: [orderId], references: [id])
+  shipmentGroup     ShipmentGroup? @relation(fields: [shipmentGroupId], references: [id])
+}
+
+model Payout {
+  id               String         @id @default(cuid())
+  sellerId         String
+  provider         String
+  providerPayoutId String?
+  status           String
+  amount           Decimal        @db.Decimal(10, 2)
+  scheduledFor     DateTime
+  releasedAt       DateTime?
+  seller           SellerProfile  @relation(fields: [sellerId], references: [id])
+}
+
+model Shipment {
+  id             String    @id @default(cuid())
+  orderId        String    @unique
+  carrier        String?
+  trackingNumber String?
+  status         String
+  shippedAt      DateTime?
+  deliveredAt    DateTime?
+  order          Order     @relation(fields: [orderId], references: [id])
+}
+
+model BuyerCheckoutProfile {
+  id                        String                  @id @default(cuid())
+  userId                    String                  @unique
+  bidReadinessStatus        BuyerBidReadinessStatus @default(not_ready)
+  defaultShippingAddressId  String?
+  defaultShippingMethodId   String?
+  defaultPaymentMethodRef   String?
+  acceptsInstantLotCharges  Boolean                 @default(false)
+  acceptsGroupedShipping    Boolean                 @default(false)
+  termsAcceptedAt           DateTime?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  user                      User                    @relation(fields: [userId], references: [id])
+  defaultShippingAddress    ShippingAddress?        @relation("DefaultShippingAddress", fields: [defaultShippingAddressId], references: [id])
+}
+
+model ShippingAddress {
+  id                  String                @id @default(cuid())
+  userId              String
+  fullName            String
+  line1               String
+  line2               String?
+  city                String
+  region              String?
+  postalCode          String
+  countryCode         String
+  phone               String?
+  isDefault           Boolean               @default(false)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  user                User                  @relation(fields: [userId], references: [id])
+  defaultForProfiles  BuyerCheckoutProfile[] @relation("DefaultShippingAddress")
+  shipmentGroups      ShipmentGroup[]
+}
+
+model ShipmentGroup {
+  id                        String              @id @default(cuid())
+  buyerId                   String
+  sellerId                  String
+  showId                    String
+  shippingAddressId         String
+  shippingMethodId          String
+  status                    ShipmentGroupStatus @default(open)
+  currency                  String
+  shippingAmount            Decimal?            @db.Decimal(10, 2)
+  shippingChargedAt         DateTime?
+  lockedAt                  DateTime?
+  createdAt                 DateTime            @default(now())
+  updatedAt                 DateTime            @updatedAt
+  buyer                     User                @relation(fields: [buyerId], references: [id])
+  shippingAddress           ShippingAddress     @relation(fields: [shippingAddressId], references: [id])
+  show                      Show                @relation(fields: [showId], references: [id])
+  orders                    Order[]
+  payments                  Payment[]
+  settledLots               SettledLot[]
+
+  @@unique([buyerId, sellerId, showId])
+}
+
+model SettledLot {
+  id               String        @id @default(cuid())
+  auctionId        String        @unique
+  orderItemId      String        @unique
+  shipmentGroupId  String
+  buyerId          String
+  chargedAmount    Decimal       @db.Decimal(10, 2)
+  currency         String
+  paidAt           DateTime?
+  createdAt        DateTime      @default(now())
+  auction          Auction       @relation(fields: [auctionId], references: [id])
+  orderItem        OrderItem     @relation(fields: [orderItemId], references: [id])
+  shipmentGroup    ShipmentGroup @relation(fields: [shipmentGroupId], references: [id])
+}
+
+model Dispute {
+  id             String    @id @default(cuid())
+  orderId        String
+  openedByUserId String
+  reason         String
+  status         String
+  resolution     String?
+  openedAt       DateTime  @default(now())
+  resolvedAt     DateTime?
+  order          Order     @relation(fields: [orderId], references: [id])
+}
+
+model ChatMessage {
+  id        String    @id @default(cuid())
+  showId     String
+  userId     String
+  message    String
+  status     String    @default("visible")
+  createdAt  DateTime  @default(now())
+  show       Show      @relation(fields: [showId], references: [id])
+}
+
+model ModerationFlag {
+  id         String    @id @default(cuid())
+  entityType String
+  entityId   String
+  reason     String
+  status     String
+  createdBy  String?
+  createdAt  DateTime  @default(now())
+}

@@ -302,12 +302,6 @@ export function goLive(showId: string) {
     return show;
   }
 
-  mockShows.forEach((item) => {
-    if (item.id !== showId && item.status === "live") {
-      item.status = "ended";
-    }
-  });
-
   show.status = "live";
 
   delete mockAuctionsByShowId[showId];
@@ -611,6 +605,11 @@ export function addShowQueueItem(input: {
   buyNowPrice?: number;
   currency?: string;
 }) {
+  const show = mockShows.find((item) => item.id === input.showId);
+  if (!show) {
+    return undefined;
+  }
+
   const items = mockShowItemsByShowId[input.showId] ?? [];
   const created: ShowItemSummary = {
     id: `item_${Date.now()}`,

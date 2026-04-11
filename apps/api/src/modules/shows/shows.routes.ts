@@ -32,10 +32,9 @@ const queueItemSchema = z.object({
   category: z.string().min(2),
   pricingMode: z.enum(["auction", "buy_now"]),
   startPrice: z.number().positive().optional(),
-  buyNowPrice: z.number().positive().optional()
-  ,
+  buyNowPrice: z.number().positive().optional(),
   currency: z.enum(["EUR", "CZK"]).optional(),
-  imageUrl: z.string().url().optional()
+  imageUrl: z.string().min(1).optional()
 });
 
 const moveQueueItemSchema = z.object({
@@ -195,6 +194,12 @@ export async function registerShowRoutes(app: FastifyInstance) {
   app.post("/shows/:showId/queue", async (request, reply) => {
     const params = z.object({ showId: z.string() }).parse(request.params);
     const payload = queueItemSchema.parse(request.body);
+    const show = getShowDetail(params.showId);
+
+    if (!show) {
+      reply.code(404);
+      return { message: "Show not found" };
+    }
 
     const created = addShowQueueItem({
       showId: params.showId,
@@ -206,6 +211,11 @@ export async function registerShowRoutes(app: FastifyInstance) {
       buyNowPrice: payload.buyNowPrice,
       currency: payload.currency
     });
+
+    if (!created) {
+      reply.code(404);
+      return { message: "Show not found" };
+    }
 
     reply.code(201);
     return created;
@@ -253,17 +263,18 @@ export async function registerShowRoutes(app: FastifyInstance) {
       const params = z.object({ showId: z.string() }).parse(request.params);
       const liveShow = goLive(params.showId);
 
-      return liveShow
-        ? {
-            id: liveShow.id,
-            status: liveShow.status,
-            streamRoomId: `room_${liveShow.id}`
-          }
-        : {
-            id: params.showId,
-            status: "live",
-            streamRoomId: "room_placeholder"
-          };
+      if (!liveShow) {
+        reply.code(404);
+        return {
+          message: "Show not found"
+        };
+      }
+
+      return {
+        id: liveShow.id,
+        status: liveShow.status,
+        streamRoomId: `room_${liveShow.id}`
+      };
     } catch (error) {
       request.log.error({ error }, "go-live failed");
       reply.code(500);

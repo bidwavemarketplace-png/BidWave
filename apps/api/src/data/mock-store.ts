@@ -113,6 +113,12 @@ type DirectMessage = {
   createdAt: string;
 };
 
+type PushTokenRegistration = {
+  profileName: string;
+  pushToken: string;
+  updatedAt: string;
+};
+
 export const mockSellerApplications: SellerApplication[] = [
   {
     id: "sel_app_1",
@@ -185,6 +191,7 @@ const mockViewerPresence: ViewerPresence[] = [];
 const mockShowLikes: ShowLike[] = [];
 const mockBuyNowListings: BuyNowListing[] = [];
 const mockDirectMessages: DirectMessage[] = [];
+const mockPushTokenRegistrations: PushTokenRegistration[] = [];
 const mockRecentWinnerByShowId: Record<
   string,
   {
@@ -939,6 +946,37 @@ export function sendDirectMessage(input: { from: string; to: string; text: strin
 
   mockDirectMessages.push(created);
   return created;
+}
+
+export function registerPushToken(input: { profileName: string; pushToken: string }) {
+  const normalizedProfileName = normalizeProfileName(input.profileName);
+  const trimmedPushToken = input.pushToken.trim();
+  const existing = mockPushTokenRegistrations.find(
+    (item) =>
+      normalizeProfileName(item.profileName) === normalizedProfileName &&
+      item.pushToken === trimmedPushToken
+  );
+
+  if (existing) {
+    existing.updatedAt = new Date().toISOString();
+    return existing;
+  }
+
+  const created: PushTokenRegistration = {
+    profileName: input.profileName.trim(),
+    pushToken: trimmedPushToken,
+    updatedAt: new Date().toISOString()
+  };
+
+  mockPushTokenRegistrations.push(created);
+  return created;
+}
+
+export function listPushTokensForProfile(profileName: string) {
+  const normalizedProfileName = normalizeProfileName(profileName);
+  return mockPushTokenRegistrations
+    .filter((item) => normalizeProfileName(item.profileName) === normalizedProfileName)
+    .map((item) => item.pushToken);
 }
 
 export function getBuyerBidReadiness(userId: string) {

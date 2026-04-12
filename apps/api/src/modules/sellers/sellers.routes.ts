@@ -5,12 +5,14 @@ import {
   createSellerApplication,
   deleteBuyNowListing,
   getSellerDashboardSummary,
+  listPushTokensForProfile,
   listBuyNowListings,
   listDirectMessages,
   listDirectMessageThreads,
   listSellerApplications,
   listSellerOrders,
   listSellerShows,
+  registerPushToken,
   sendDirectMessage
 } from "../../data/mock-store";
 
@@ -41,7 +43,44 @@ const directMessageSchema = z.object({
   text: z.string().min(1)
 });
 
+const pushTokenSchema = z.object({
+  profileName: z.string().min(2),
+  pushToken: z.string().min(8)
+});
+
 export async function registerSellerRoutes(app: FastifyInstance) {
+  const sendExpoPushNotification = async (input: {
+    to: string[];
+    title: string;
+    body: string;
+    data: Record<string, unknown>;
+  }) => {
+    if (input.to.length === 0) {
+      return;
+    }
+
+    const messages = input.to.map((token) => ({
+      to: token,
+      title: input.title,
+      body: input.body,
+      sound: "default",
+      data: input.data
+    }));
+
+    try {
+      await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        body: JSON.stringify(messages)
+      });
+    } catch (error) {
+      app.log.warn({ error }, "Unable to dispatch Expo push notification");
+    }
+  };
+
   app.get("/seller-applications", async () => {
     return {
       items: listSellerApplications()
@@ -110,6 +149,25 @@ export async function registerSellerRoutes(app: FastifyInstance) {
   app.post("/direct-messages", async (request, reply) => {
     const payload = directMessageSchema.parse(request.body);
     const created = sendDirectMessage(payload);
+
+    const recipientTokens = listPushTokensForProfile(payload.to);
+    await sendExpoPushNotification({
+      to: recipientTokens,
+      title: payload.from.trim(),
+      body: payload.text.trim(),
+      data: {
+        kind: "direct-message",
+        counterpartName: payload.from.trim()
+      }
+    });
+
+    reply.code(201);
+    return created;
+  });
+
+  app.post("/push-tokens", async (request, reply) => {
+    const payload = pushTokenSchema.parse(request.body);
+    const created = registerPushToken(payload);
     reply.code(201);
     return created;
   });

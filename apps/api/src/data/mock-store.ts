@@ -87,6 +87,32 @@ type ViewerPresence = {
   lastSeenAt: string;
 };
 
+type ShowLike = {
+  showId: string;
+  userId: string;
+  createdAt: string;
+};
+
+type BuyNowListing = {
+  id: string;
+  sellerName: string;
+  title: string;
+  price: number;
+  currency: string;
+  imageUrl?: string;
+  createdAt: string;
+};
+
+type DirectMessage = {
+  id: string;
+  participants: [string, string];
+  author: string;
+  authorProfile: string;
+  recipientProfile: string;
+  text: string;
+  createdAt: string;
+};
+
 export const mockSellerApplications: SellerApplication[] = [
   {
     id: "sel_app_1",
@@ -156,6 +182,9 @@ const mockMaxBidPreferences: MaxBidPreference[] = [];
 
 const mockShipmentGroups: ShipmentGroupSummary[] = [];
 const mockViewerPresence: ViewerPresence[] = [];
+const mockShowLikes: ShowLike[] = [];
+const mockBuyNowListings: BuyNowListing[] = [];
+const mockDirectMessages: DirectMessage[] = [];
 const mockRecentWinnerByShowId: Record<
   string,
   {
@@ -170,6 +199,12 @@ const mockRecentWinnerByShowId: Record<
 export const mockOrders: OrderSummary[] = [];
 
 const mockOrderDetails: Record<string, OrderDetail> = {};
+
+const normalizeProfileName = (value: string) => value.trim().toLowerCase();
+const directThreadParticipants = (left: string, right: string): [string, string] => {
+  const pair = [normalizeProfileName(left), normalizeProfileName(right)].sort();
+  return [pair[0], pair[1]];
+};
 
 export function listSellerApplications() {
   return mockSellerApplications;
@@ -212,6 +247,50 @@ export function getSellerDashboardSummary(sellerId: string): SellerDashboardSumm
 
 export function listSellerShows(sellerId: string) {
   return mockShows.filter((show) => show.sellerId === sellerId);
+}
+
+export function countShowLikes(showId: string) {
+  return mockShowLikes.filter((entry) => entry.showId === showId).length;
+}
+
+export function isShowLikedByUser(showId: string, userId?: string) {
+  if (!userId) {
+    return false;
+  }
+
+  return mockShowLikes.some((entry) => entry.showId === showId && entry.userId === userId);
+}
+
+export function toggleShowLike(showId: string, userId: string) {
+  const show = mockShows.find((entry) => entry.id === showId);
+  if (!show) {
+    return undefined;
+  }
+
+  const existingIndex = mockShowLikes.findIndex(
+    (entry) => entry.showId === showId && entry.userId === userId
+  );
+
+  if (existingIndex >= 0) {
+    mockShowLikes.splice(existingIndex, 1);
+    return {
+      showId,
+      liked: false,
+      likeCount: countShowLikes(showId)
+    };
+  }
+
+  mockShowLikes.push({
+    showId,
+    userId,
+    createdAt: new Date().toISOString()
+  });
+
+  return {
+    showId,
+    liked: true,
+    likeCount: countShowLikes(showId)
+  };
 }
 
 export function createShow(
@@ -313,7 +392,10 @@ export function listSellerOrders(sellerName: string) {
   return listBuyerOrders(undefined, sellerName);
 }
 
-export function getShowDetail(showId: string): ShowDetail | undefined {
+export function getShowDetail(
+  showId: string,
+  userId?: string
+): (ShowDetail & { likeCount: number; likedByUser: boolean }) | undefined {
   ensureAuctionState(showId);
   const show = mockShows.find((item) => item.id === showId);
 
@@ -335,7 +417,9 @@ export function getShowDetail(showId: string): ShowDetail | undefined {
     streamRoomId: `room_${showId}`,
     grossRevenue,
     netRevenue: Number((grossRevenue * 0.92).toFixed(2)),
-    recentWinner: mockRecentWinnerByShowId[showId]
+    recentWinner: mockRecentWinnerByShowId[showId],
+    likeCount: countShowLikes(showId),
+    likedByUser: isShowLikedByUser(showId, userId)
   };
 }
 
@@ -706,7 +790,7 @@ export function searchCatalog(query: string) {
     return [];
   }
 
-  return Object.entries(mockShowItemsByShowId)
+  const scheduledMatches = Object.entries(mockShowItemsByShowId)
     .flatMap(([showId, items]) => {
       const show = mockShows.find((item) => item.id === showId);
       if (!show) {
@@ -729,6 +813,132 @@ export function searchCatalog(query: string) {
         }));
     })
     .sort((left, right) => left.queuePosition - right.queuePosition);
+
+  const buyNowMatches = mockBuyNowListings
+    .filter(
+      (item) =>
+        item.title.toLowerCase().includes(normalized) || item.sellerName.toLowerCase().includes(normalized)
+    )
+    .map<CatalogSearchItem>((item) => ({
+      id: `buy_now_${item.id}`,
+      itemId: item.id,
+      itemTitle: item.title,
+      itemCategory: "Buy now",
+      queuePosition: 0,
+      sellerName: item.sellerName,
+      showId: "",
+      showTitle: "",
+      showStatus: "scheduled",
+      scheduledFor: item.createdAt
+    }));
+
+  return [...scheduledMatches, ...buyNowMatches];
+}
+
+export function listBuyNowListings(sellerName?: string) {
+  if (!sellerName) {
+    return [...mockBuyNowListings].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  }
+
+  return mockBuyNowListings
+    .filter((item) => normalizeProfileName(item.sellerName) === normalizeProfileName(sellerName))
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+}
+
+export function createBuyNowListing(input: {
+  sellerName: string;
+  title: string;
+  price: number;
+  currency?: string;
+  imageUrl?: string;
+}) {
+  const created: BuyNowListing = {
+    id: `buy_now_${Date.now()}`,
+    sellerName: input.sellerName,
+    title: input.title,
+    price: input.price,
+    currency: input.currency ?? "EUR",
+    imageUrl: input.imageUrl,
+    createdAt: new Date().toISOString()
+  };
+
+  mockBuyNowListings.unshift(created);
+  return created;
+}
+
+export function deleteBuyNowListing(listingId: string) {
+  const index = mockBuyNowListings.findIndex((item) => item.id === listingId);
+  if (index === -1) {
+    return undefined;
+  }
+
+  const [removed] = mockBuyNowListings.splice(index, 1);
+  return removed;
+}
+
+export function listDirectMessageThreads(profileName: string) {
+  const normalizedProfileName = normalizeProfileName(profileName);
+  const threads = new Map<
+    string,
+    {
+      counterpartName: string;
+      messages: DirectMessage[];
+      lastMessage?: DirectMessage;
+    }
+  >();
+
+  mockDirectMessages
+    .filter((message) => message.participants.includes(normalizedProfileName))
+    .forEach((message) => {
+      const counterpartName =
+        message.authorProfile === normalizedProfileName ? message.recipientProfile : message.author;
+      const threadKey = directThreadParticipants(normalizedProfileName, counterpartName).join("::");
+      const existing = threads.get(threadKey) ?? { counterpartName, messages: [] as DirectMessage[] };
+      existing.messages.push(message);
+      existing.lastMessage = message;
+      threads.set(threadKey, existing);
+    });
+
+  return [...threads.values()]
+    .map((thread) => ({
+      counterpartName: thread.counterpartName,
+      lastMessage: thread.lastMessage,
+      messageCount: thread.messages.length
+    }))
+    .sort((left, right) => {
+      const leftTime = left.lastMessage ? Date.parse(left.lastMessage.createdAt) : 0;
+      const rightTime = right.lastMessage ? Date.parse(right.lastMessage.createdAt) : 0;
+      return rightTime - leftTime;
+    });
+}
+
+export function listDirectMessages(profileName: string, counterpartName: string) {
+  const participants = directThreadParticipants(profileName, counterpartName);
+  return mockDirectMessages
+    .filter(
+      (message) => message.participants[0] === participants[0] && message.participants[1] === participants[1]
+    )
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+    .map((message) => ({
+      ...message,
+      author: message.author
+    }));
+}
+
+export function sendDirectMessage(input: { from: string; to: string; text: string }) {
+  const participants = directThreadParticipants(input.from, input.to);
+  const created: DirectMessage = {
+    id: `dm_${Date.now()}`,
+    participants,
+    author: input.from.trim(),
+    authorProfile: normalizeProfileName(input.from),
+    recipientProfile: input.to.trim(),
+    text: input.text,
+    createdAt: new Date().toISOString()
+  };
+
+  mockDirectMessages.push(created);
+  return created;
 }
 
 export function getBuyerBidReadiness(userId: string) {

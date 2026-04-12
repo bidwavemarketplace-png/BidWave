@@ -3,15 +3,18 @@ import { z } from "zod";
 import {
   addShowQueueItem,
   cancelShow,
+  countShowLikes,
   createShow,
   endStream,
   goLive,
   getShowDetail,
+  isShowLikedByUser,
   listSellerShows,
   listShowQueue,
   moveQueueItem,
   mockShows,
   searchCatalog,
+  toggleShowLike,
   touchViewerPresence,
   clearViewerPresence,
   updateShow,
@@ -52,6 +55,14 @@ const viewerPresenceSchema = z.object({
   source: z.enum(["discover", "live_show"]).optional()
 });
 
+const showDetailQuerySchema = z.object({
+  userId: z.string().optional()
+});
+
+const showLikeToggleSchema = z.object({
+  userId: z.string().min(1)
+});
+
 export async function registerShowRoutes(app: FastifyInstance) {
   app.get("/shows", async (request) => {
     const query = z
@@ -59,7 +70,8 @@ export async function registerShowRoutes(app: FastifyInstance) {
         status: z.string().optional(),
         category: z.string().optional(),
         country: z.string().optional(),
-        sellerId: z.string().optional()
+        sellerId: z.string().optional(),
+        userId: z.string().optional()
       })
       .parse(request.query);
 
@@ -73,7 +85,11 @@ export async function registerShowRoutes(app: FastifyInstance) {
 
     return {
       filters: query,
-      items: statusFiltered
+      items: statusFiltered.map((item) => ({
+        ...item,
+        likeCount: countShowLikes(item.id),
+        likedByUser: isShowLikedByUser(item.id, query.userId)
+      }))
     };
   });
 
@@ -130,7 +146,8 @@ export async function registerShowRoutes(app: FastifyInstance) {
 
   app.get("/shows/:showId", async (request) => {
     const params = z.object({ showId: z.string() }).parse(request.params);
-    const show = getShowDetail(params.showId);
+    const query = showDetailQuerySchema.parse(request.query);
+    const show = getShowDetail(params.showId, query.userId);
 
     return show ?? {
       id: params.showId,
@@ -140,6 +157,8 @@ export async function registerShowRoutes(app: FastifyInstance) {
       viewers: 0,
       coverImage: "",
       streamRoomId: "room_placeholder",
+      likeCount: 0,
+      likedByUser: false,
       seller: {
         id: "seller_placeholder",
         storeName: "BidWave Pilot Seller"
@@ -256,6 +275,19 @@ export async function registerShowRoutes(app: FastifyInstance) {
     }
 
     return started;
+  });
+
+  app.post("/shows/:showId/likes/toggle", async (request, reply) => {
+    const params = z.object({ showId: z.string() }).parse(request.params);
+    const payload = showLikeToggleSchema.parse(request.body);
+    const result = toggleShowLike(params.showId, payload.userId);
+
+    if (!result) {
+      reply.code(404);
+      return { message: "Show not found" };
+    }
+
+    return result;
   });
 
   app.post("/shows/:showId/go-live", async (request, reply) => {

@@ -54,11 +54,15 @@ type ShipmentGroupSummary = {
   currency: string;
   trackingNumber?: string;
   deliveryProvider?: string;
+  trackingStatus?: string;
+  trackingLastEvent?: string;
+  trackingLastEventAt?: string;
   placedAt: string;
 };
 
 type CatalogSearchItem = {
   id: string;
+  kind: "scheduled_lot" | "buy_now_product";
   itemId: string;
   itemTitle: string;
   itemCategory: string;
@@ -68,6 +72,8 @@ type CatalogSearchItem = {
   showTitle: string;
   showStatus: "draft" | "scheduled" | "live" | "ended" | "cancelled";
   scheduledFor: string;
+  priceLabel?: string;
+  imageUrl?: string;
 };
 
 type MaxBidPreference = {
@@ -119,6 +125,35 @@ type PushTokenRegistration = {
   updatedAt: string;
 };
 
+type UserProfileRecord = {
+  uid: string;
+  email: string;
+  username: string;
+  fullName: string;
+  dateOfBirth: string;
+  addressLine1: string;
+  city: string;
+  postalCode: string;
+  country: string;
+  phone: string;
+  updatedAt: string;
+  usernameChangedAt?: string;
+  preferredLocale?: "en" | "sk" | "cs";
+  preferredCurrency?: "EUR" | "CZK";
+  onboardingCompleted?: boolean;
+  profileImageUrl?: string;
+};
+
+type ShipmentTrackingSnapshot = {
+  provider: "packeta" | "balikovna" | "manual";
+  trackingNumber: string;
+  status: string;
+  lastEvent?: string;
+  lastEventAt?: string;
+  updatedAt: string;
+  source: "packeta_api" | "manual";
+};
+
 export const mockSellerApplications: SellerApplication[] = [
   {
     id: "sel_app_1",
@@ -138,6 +173,7 @@ export const mockShows: ShowSummary[] = [];
 const mockShowItemsByShowId: Record<string, ShowItemSummary[]> = {};
 
 const mockShowDescriptions: Record<string, string> = {};
+const mockShowLineupHiddenByShowId: Record<string, boolean> = {};
 
 const mockAuctionsByShowId: Record<string, AuctionState> = {};
 
@@ -192,6 +228,57 @@ const mockShowLikes: ShowLike[] = [];
 const mockBuyNowListings: BuyNowListing[] = [];
 const mockDirectMessages: DirectMessage[] = [];
 const mockPushTokenRegistrations: PushTokenRegistration[] = [];
+const mockUserProfiles: UserProfileRecord[] = [];
+
+function sanitizeUserProfile(profile: UserProfileRecord) {
+  return Object.fromEntries(
+    Object.entries(profile).filter(([, value]) => value !== undefined)
+  ) as UserProfileRecord;
+}
+
+function findShipmentGroupByOrderId(orderId: string) {
+  if (orderId.startsWith("sold_")) {
+    const shipmentGroupId = orderId.replace(/^sold_/, "");
+    return mockShipmentGroups.find((group) => group.id === shipmentGroupId);
+  }
+
+  if (orderId.startsWith("ord_ship_group_")) {
+    const shipmentGroupId = orderId.replace(/^ord_/, "");
+    return mockShipmentGroups.find((group) => group.id === shipmentGroupId);
+  }
+
+  return undefined;
+}
+
+function syncShipmentGroupToOrders(group: ShipmentGroupSummary) {
+  const soldOrderId = `sold_${group.id}`;
+  const wonOrderId = `ord_${group.id}`;
+
+  for (const order of mockOrders) {
+    if (order.id !== soldOrderId && order.id !== wonOrderId) {
+      continue;
+    }
+
+    order.status = group.trackingNumber ? "shipped" : "fulfillment_pending";
+    order.trackingNumber = group.trackingNumber;
+    order.deliveryProvider = group.deliveryProvider;
+    order.trackingStatus = group.trackingStatus;
+    order.trackingLastEvent = group.trackingLastEvent;
+    order.trackingLastEventAt = group.trackingLastEventAt;
+  }
+
+  if (mockOrderDetails[wonOrderId]) {
+    mockOrderDetails[wonOrderId] = {
+      ...mockOrderDetails[wonOrderId],
+      shipmentStatus: group.trackingStatus ?? (group.trackingNumber ? "label_created" : "grouped_open"),
+      trackingNumber: group.trackingNumber,
+      deliveryProvider: group.deliveryProvider,
+      trackingStatus: group.trackingStatus,
+      trackingLastEvent: group.trackingLastEvent,
+      trackingLastEventAt: group.trackingLastEventAt
+    } as OrderDetail;
+  }
+}
 const mockRecentWinnerByShowId: Record<
   string,
   {
@@ -301,7 +388,7 @@ export function toggleShowLike(showId: string, userId: string) {
 }
 
 export function createShow(
-  input: Pick<ShowSummary, "title" | "sellerId" | "sellerName" | "scheduledFor">
+  input: Pick<ShowSummary, "title" | "sellerId" | "sellerName" | "scheduledFor" | "lineupHidden">
 ) {
   const show: ShowSummary = {
     id: `show_${mockShows.length + 1}`,
@@ -312,6 +399,7 @@ export function createShow(
   mockShows.push(show);
   mockShowItemsByShowId[show.id] = [];
   mockShowDescriptions[show.id] = "Fresh stream lineup ready for queue planning and live lot control.";
+  mockShowLineupHiddenByShowId[show.id] = input.lineupHidden ?? false;
   return show;
 }
 
@@ -320,6 +408,7 @@ export function updateShow(input: {
   title: string;
   description: string;
   scheduledFor: string;
+  lineupHidden?: boolean;
 }) {
   const show = mockShows.find((item) => item.id === input.showId);
   if (!show) {
@@ -332,7 +421,9 @@ export function updateShow(input: {
 
   show.title = input.title;
   show.scheduledFor = input.scheduledFor;
+  show.lineupHidden = input.lineupHidden ?? show.lineupHidden ?? false;
   mockShowDescriptions[input.showId] = input.description;
+  mockShowLineupHiddenByShowId[input.showId] = input.lineupHidden ?? mockShowLineupHiddenByShowId[input.showId] ?? false;
   return show;
 }
 
@@ -351,6 +442,7 @@ export function cancelShow(showId: string) {
   delete mockShowItemsByShowId[showId];
   delete mockShowDescriptions[showId];
   delete mockAuctionsByShowId[showId];
+  delete mockShowLineupHiddenByShowId[showId];
 
   return show;
 }
@@ -415,6 +507,7 @@ export function getShowDetail(
 
   return {
     ...show,
+    lineupHidden: mockShowLineupHiddenByShowId[showId] ?? show.lineupHidden ?? false,
     description: mockShowDescriptions[showId] ?? "Show detail coming soon.",
     viewers: countActiveViewers(showId),
     coverImage:
@@ -804,10 +897,15 @@ export function searchCatalog(query: string) {
         return [];
       }
 
+      if (mockShowLineupHiddenByShowId[showId] ?? show.lineupHidden) {
+        return [];
+      }
+
       return items
         .filter((item) => item.title.toLowerCase().includes(normalized) || item.category.toLowerCase().includes(normalized))
         .map<CatalogSearchItem>((item) => ({
           id: `${showId}_${item.id}`,
+          kind: "scheduled_lot",
           itemId: item.id,
           itemTitle: item.title,
           itemCategory: item.category,
@@ -828,6 +926,7 @@ export function searchCatalog(query: string) {
     )
     .map<CatalogSearchItem>((item) => ({
       id: `buy_now_${item.id}`,
+      kind: "buy_now_product",
       itemId: item.id,
       itemTitle: item.title,
       itemCategory: "Buy now",
@@ -836,7 +935,9 @@ export function searchCatalog(query: string) {
       showId: "",
       showTitle: "",
       showStatus: "scheduled",
-      scheduledFor: item.createdAt
+      scheduledFor: item.createdAt,
+      priceLabel: `${item.price.toFixed(2)} ${item.currency}`,
+      imageUrl: item.imageUrl
     }));
 
   return [...scheduledMatches, ...buyNowMatches];
@@ -979,6 +1080,49 @@ export function listPushTokensForProfile(profileName: string) {
     .map((item) => item.pushToken);
 }
 
+export function getUserProfile(uid: string) {
+  return mockUserProfiles.find((item) => item.uid === uid);
+}
+
+export function saveUserProfile(input: UserProfileRecord) {
+  const sanitized = sanitizeUserProfile({
+    ...input,
+    username: input.username.trim(),
+    updatedAt: input.updatedAt || new Date().toISOString()
+  });
+  const existing = mockUserProfiles.find((item) => item.uid === input.uid);
+  if (existing) {
+    Object.assign(existing, sanitized);
+    return existing;
+  }
+
+  mockUserProfiles.push(sanitized);
+  return sanitized;
+}
+
+export function deleteUserProfile(uid: string) {
+  const index = mockUserProfiles.findIndex((item) => item.uid === uid);
+  if (index === -1) {
+    return undefined;
+  }
+
+  const [removed] = mockUserProfiles.splice(index, 1);
+  return removed;
+}
+
+export function reserveUsernameForProfile(input: { uid: string; username: string; previousUsername?: string }) {
+  const normalizedUsername = input.username.trim().toLowerCase();
+  const conflicting = mockUserProfiles.find(
+    (item) => item.uid !== input.uid && item.username.trim().toLowerCase() === normalizedUsername
+  );
+
+  if (conflicting) {
+    throw new Error("Username already exists.");
+  }
+
+  return input.username.trim();
+}
+
 export function getBuyerBidReadiness(userId: string) {
   return (
     mockBidReadinessByUserId[userId] ?? {
@@ -1111,7 +1255,10 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
     itemTitles: [...shipmentGroup.itemTitles],
     shippingAmount: shipmentGroup.shippingAmount,
     trackingNumber: shipmentGroup.trackingNumber,
-    deliveryProvider: shipmentGroup.deliveryProvider
+    deliveryProvider: shipmentGroup.deliveryProvider,
+    trackingStatus: shipmentGroup.trackingStatus,
+    trackingLastEvent: shipmentGroup.trackingLastEvent,
+    trackingLastEventAt: shipmentGroup.trackingLastEventAt
   };
 
   const orderDetail: OrderDetail = {
@@ -1204,7 +1351,10 @@ export function listBuyerOrders(userId?: string, sellerName?: string) {
       itemTitles: [...group.itemTitles],
       shippingAmount: group.shippingAmount,
       trackingNumber: group.trackingNumber,
-      deliveryProvider: group.deliveryProvider
+      deliveryProvider: group.deliveryProvider,
+      trackingStatus: group.trackingStatus,
+      trackingLastEvent: group.trackingLastEvent,
+      trackingLastEventAt: group.trackingLastEventAt
     }));
 
   return [...wonOrders, ...soldOrders].sort(
@@ -1214,4 +1364,57 @@ export function listBuyerOrders(userId?: string, sellerName?: string) {
 
 export function getOrderDetail(orderId: string) {
   return mockOrderDetails[orderId];
+}
+
+export function saveOrderTracking(input: {
+  orderId: string;
+  provider: "packeta" | "balikovna" | "manual";
+  trackingNumber: string;
+}) {
+  const shipmentGroup = findShipmentGroupByOrderId(input.orderId);
+  if (!shipmentGroup) {
+    return undefined;
+  }
+
+  shipmentGroup.trackingNumber = input.trackingNumber.trim();
+  shipmentGroup.deliveryProvider = input.provider;
+  shipmentGroup.trackingStatus = "tracking_added";
+  shipmentGroup.trackingLastEvent = "Tracking number was added";
+  shipmentGroup.trackingLastEventAt = new Date().toISOString();
+  syncShipmentGroupToOrders(shipmentGroup);
+
+  return shipmentGroup;
+}
+
+export function getOrderTracking(orderId: string) {
+  const shipmentGroup = findShipmentGroupByOrderId(orderId);
+  if (!shipmentGroup || !shipmentGroup.trackingNumber) {
+    return undefined;
+  }
+
+  return {
+    provider: (shipmentGroup.deliveryProvider as "packeta" | "balikovna" | "manual" | undefined) ?? "manual",
+    trackingNumber: shipmentGroup.trackingNumber,
+    status: shipmentGroup.trackingStatus ?? "tracking_added",
+    lastEvent: shipmentGroup.trackingLastEvent,
+    lastEventAt: shipmentGroup.trackingLastEventAt,
+    updatedAt: shipmentGroup.trackingLastEventAt ?? shipmentGroup.placedAt,
+    source: "manual" as const
+  };
+}
+
+export function applyOrderTrackingSnapshot(orderId: string, snapshot: ShipmentTrackingSnapshot) {
+  const shipmentGroup = findShipmentGroupByOrderId(orderId);
+  if (!shipmentGroup) {
+    return undefined;
+  }
+
+  shipmentGroup.deliveryProvider = snapshot.provider;
+  shipmentGroup.trackingNumber = snapshot.trackingNumber;
+  shipmentGroup.trackingStatus = snapshot.status;
+  shipmentGroup.trackingLastEvent = snapshot.lastEvent;
+  shipmentGroup.trackingLastEventAt = snapshot.lastEventAt ?? snapshot.updatedAt;
+  syncShipmentGroupToOrders(shipmentGroup);
+
+  return shipmentGroup;
 }

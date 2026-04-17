@@ -24,6 +24,9 @@ export type OrderSummary = {
   shippingAmount?: number;
   trackingNumber?: string;
   deliveryProvider?: string;
+  trackingStatus?: string;
+  trackingLastEvent?: string;
+  trackingLastEventAt?: string;
 };
 
 export type OrderDetail = OrderSummary & {

@@ -7,6 +7,7 @@ export type ShowSummary = {
   sellerName: string;
   status: ShowStatus;
   scheduledFor: string;
+  lineupHidden?: boolean;
 };
 
 export type ShowItemSummary = {

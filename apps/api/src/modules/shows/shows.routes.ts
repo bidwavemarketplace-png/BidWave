@@ -27,7 +27,8 @@ const createShowSchema = z.object({
   scheduledFor: z.string().datetime(),
   category: z.string().min(2),
   sellerId: z.string().min(3),
-  sellerName: z.string().min(2)
+  sellerName: z.string().min(2),
+  lineupHidden: z.boolean().optional()
 });
 
 const queueItemSchema = z.object({
@@ -47,7 +48,8 @@ const moveQueueItemSchema = z.object({
 const updateShowSchema = z.object({
   title: z.string().min(2),
   description: z.string().min(3),
-  scheduledFor: z.string().datetime()
+  scheduledFor: z.string().datetime(),
+  lineupHidden: z.boolean().optional()
 });
 
 const viewerPresenceSchema = z.object({
@@ -107,7 +109,8 @@ export async function registerShowRoutes(app: FastifyInstance) {
       title: payload.title,
       sellerId: payload.sellerId,
       sellerName: payload.sellerName,
-      scheduledFor: payload.scheduledFor
+      scheduledFor: payload.scheduledFor,
+      lineupHidden: payload.lineupHidden
     });
 
     reply.code(201);
@@ -125,7 +128,8 @@ export async function registerShowRoutes(app: FastifyInstance) {
       showId: params.showId,
       title: payload.title,
       description: payload.description,
-      scheduledFor: payload.scheduledFor
+      scheduledFor: payload.scheduledFor,
+      lineupHidden: payload.lineupHidden
     });
 
     if (updated === undefined) {

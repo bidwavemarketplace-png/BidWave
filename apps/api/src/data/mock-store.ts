@@ -150,6 +150,17 @@ type UserProfileRecord = {
   preferredCurrency?: "EUR" | "CZK";
   onboardingCompleted?: boolean;
   profileImageUrl?: string;
+  bidReadinessReady?: boolean;
+  bidReadinessStatus?: "not_ready" | "ready" | "payment_retry_required" | "restricted";
+  bidDefaultShippingMethodId?: string;
+  bidPaymentMethodToken?: string;
+  bidAcceptsInstantLotCharges?: boolean;
+  bidAcceptsGroupedShippingCharges?: boolean;
+  bidShippingProvider?: "packeta" | "balikovna";
+  bidPickupPointId?: string;
+  bidPickupPointLabel?: string;
+  bidShippingPrice?: number;
+  bidTermsAcceptedAt?: string;
   sellerType?: "trader" | "non_trader";
   businessName?: string;
   companyId?: string;
@@ -1195,12 +1206,45 @@ export function getUserProfile(uid: string) {
   return mockUserProfiles.find((item) => item.uid === uid);
 }
 
+function syncBidReadinessFromUserProfile(profile: UserProfileRecord) {
+  if (!profile.bidReadinessReady && !profile.bidPaymentMethodToken && !profile.bidDefaultShippingMethodId) {
+    return;
+  }
+
+  mockBidReadinessByUserId[profile.uid] = {
+    ready: Boolean(profile.bidReadinessReady),
+    status: profile.bidReadinessStatus ?? (profile.bidReadinessReady ? "ready" : "not_ready"),
+    fullName: profile.fullName,
+    dateOfBirth: profile.dateOfBirth,
+    line1: profile.addressLine1,
+    city: profile.city,
+    postalCode: profile.postalCode,
+    countryCode: profile.country,
+    phone: profile.phone,
+    defaultShippingAddressId: `addr_${profile.uid}`,
+    defaultShippingMethodId: profile.bidDefaultShippingMethodId,
+    defaultPaymentMethodId: profile.bidPaymentMethodToken,
+    termsAcceptedAt: profile.bidTermsAcceptedAt,
+    shippingAddressSummary:
+      profile.bidPickupPointLabel?.trim() || `${profile.addressLine1}, ${profile.city}`,
+    shippingMethodLabel: profile.bidShippingProvider
+      ? `${profile.bidShippingProvider}${profile.bidShippingPrice ? ` • ${profile.bidShippingPrice.toFixed(2)} EUR` : ""}`
+      : profile.bidDefaultShippingMethodId,
+    cardSummary: profile.bidPaymentMethodToken,
+    shippingProvider: profile.bidShippingProvider,
+    pickupPointId: profile.bidPickupPointId,
+    pickupPointLabel: profile.bidPickupPointLabel,
+    shippingPrice: profile.bidShippingPrice
+  };
+}
+
 export function saveUserProfile(input: UserProfileRecord) {
   const sanitized = sanitizeUserProfile({
     ...input,
     username: input.username.trim(),
     updatedAt: input.updatedAt || new Date().toISOString()
   });
+  syncBidReadinessFromUserProfile(sanitized);
   const existing = mockUserProfiles.find((item) => item.uid === input.uid);
   if (existing) {
     Object.assign(existing, sanitized);

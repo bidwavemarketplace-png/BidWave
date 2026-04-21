@@ -60,6 +60,14 @@ type ShipmentGroupSummary = {
   placedAt: string;
 };
 
+type AuctionSettlementResult = {
+  shipmentGroupId: string;
+  shippingStatus: "open" | "shipping_pending" | "shipping_paid";
+  chargedAmount: number;
+  currency: string;
+  order: OrderSummary & { shipmentGroupLabel?: string };
+};
+
 type CatalogSearchItem = {
   id: string;
   kind: "scheduled_lot" | "buy_now_product";
@@ -142,6 +150,12 @@ type UserProfileRecord = {
   preferredCurrency?: "EUR" | "CZK";
   onboardingCompleted?: boolean;
   profileImageUrl?: string;
+  sellerType?: "trader" | "non_trader";
+  businessName?: string;
+  companyId?: string;
+  vatId?: string;
+  feeAcceptedAt?: string;
+  sellerTermsAcceptedAt?: string;
 };
 
 type ShipmentTrackingSnapshot = {
@@ -176,6 +190,7 @@ const mockShowDescriptions: Record<string, string> = {};
 const mockShowLineupHiddenByShowId: Record<string, boolean> = {};
 
 const mockAuctionsByShowId: Record<string, AuctionState> = {};
+const mockLastAuctionSettlementByShowId: Record<string, AuctionSettlementResult> = {};
 
 function ensureAuctionState(showId: string) {
   const auction = mockAuctionsByShowId[showId];
@@ -195,12 +210,25 @@ function ensureAuctionState(showId: string) {
   auction.status = "ended";
   auction.endsAt = new Date().toISOString();
 
-  const activeItem = mockShowItemsByShowId[showId]?.find((item) => item.id === auction.showItemId);
-  if (activeItem) {
-    activeItem.lotStatus = "sold";
+  if (auction.highestBidderId && auction.highestBidderName) {
+    settleMockAuctionLot({ showId });
+  } else {
+    const activeItem = mockShowItemsByShowId[showId]?.find((item) => item.id === auction.showItemId);
+    if (activeItem) {
+      activeItem.lotStatus = "sold";
+    }
+    mockShowItemsByShowId[showId] = (mockShowItemsByShowId[showId] ?? [])
+      .filter((item) => item.id !== auction.showItemId)
+      .map((item, index) => ({
+        ...item,
+        queuePosition: index + 1
+      }));
+    clearMaxBidsForItem(showId, auction.showItemId);
+    delete mockRecentWinnerByShowId[showId];
+    delete mockAuctionsByShowId[showId];
   }
 
-  return auction;
+  return mockAuctionsByShowId[showId];
 }
 
 function getNextQueuePosition(showId: string) {
@@ -497,6 +525,7 @@ export function getShowDetail(
 ): (ShowDetail & { likeCount: number; likedByUser: boolean }) | undefined {
   ensureAuctionState(showId);
   const show = mockShows.find((item) => item.id === showId);
+  const auction = mockAuctionsByShowId[showId];
 
   if (!show) {
     return undefined;
@@ -513,7 +542,7 @@ export function getShowDetail(
     coverImage:
       "https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1200&q=80",
     items: mockShowItemsByShowId[showId] ?? [],
-    activeItemId: mockAuctionsByShowId[showId]?.showItemId,
+    activeItemId: auction?.status === "live" ? auction.showItemId : undefined,
     streamRoomId: `room_${showId}`,
     grossRevenue,
     netRevenue: Number((grossRevenue * 0.92).toFixed(2)),
@@ -773,6 +802,63 @@ export function closeMockAuction(showId: string) {
   return auction;
 }
 
+export function closeAndSettleMockAuctionLot(input: { showId: string; userId?: string; buyerName?: string }) {
+  const show = mockShows.find((item) => item.id === input.showId);
+  const auction = mockAuctionsByShowId[input.showId];
+
+  if (!show || !auction) {
+    return mockLastAuctionSettlementByShowId[input.showId];
+  }
+
+  auction.status = "ended";
+  auction.endsAt = new Date().toISOString();
+
+  const activeItem = mockShowItemsByShowId[input.showId]?.find((item) => item.id === auction.showItemId);
+  if (!activeItem) {
+    return null;
+  }
+
+  if (!auction.highestBidderId || !auction.highestBidderName) {
+    activeItem.lotStatus = "sold";
+    clearMaxBidsForItem(input.showId, auction.showItemId);
+    mockShowItemsByShowId[input.showId] = (mockShowItemsByShowId[input.showId] ?? [])
+      .filter((item) => item.id !== auction.showItemId)
+      .map((item, index) => ({
+        ...item,
+        queuePosition: index + 1
+      }));
+    delete mockAuctionsByShowId[input.showId];
+    delete mockRecentWinnerByShowId[input.showId];
+    const emptySettlement: AuctionSettlementResult = {
+      shipmentGroupId: `stream-${input.showId}`,
+      shippingStatus: "open" as const,
+      chargedAmount: 0,
+      currency: activeItem.currency ?? "EUR",
+      order: {
+        id: `ord_none_${Date.now()}`,
+        buyerName: "",
+        sellerName: show.sellerName,
+        showTitle: show.title,
+        status: "paid" as const,
+        totalAmount: 0,
+        currency: activeItem.currency ?? "EUR",
+        placedAt: new Date().toISOString(),
+        showId: show.id,
+        buyerId: undefined,
+        sellerId: show.sellerId,
+        orderType: "won" as const,
+        itemTitles: [activeItem.title],
+        shippingAmount: 0,
+        shipmentGroupLabel: `${show.title} · 0 lots`
+      }
+    };
+    mockLastAuctionSettlementByShowId[input.showId] = emptySettlement;
+    return emptySettlement;
+  }
+
+  return settleMockAuctionLot(input);
+}
+
 export function listShowQueue(showId: string) {
   return (mockShowItemsByShowId[showId] ?? []).slice().sort((left, right) => {
     return (left.queuePosition ?? 0) - (right.queuePosition ?? 0);
@@ -843,6 +929,25 @@ export function moveQueueItem(input: { showId: string; itemId: string; direction
   return listShowQueue(input.showId);
 }
 
+export function removeQueueItem(input: { showId: string; itemId: string }) {
+  const items = mockShowItemsByShowId[input.showId];
+  if (!items) {
+    return undefined;
+  }
+
+  const nextItems = items.filter((item) => item.id !== input.itemId);
+  if (nextItems.length === items.length) {
+    return undefined;
+  }
+
+  mockShowItemsByShowId[input.showId] = nextItems.map((item, index) => ({
+    ...item,
+    queuePosition: index + 1
+  }));
+
+  return listShowQueue(input.showId);
+}
+
 export function startNextQueuedAuction(showId: string) {
   const existingAuction = ensureAuctionState(showId);
   const show = mockShows.find((item) => item.id === showId);
@@ -850,9 +955,15 @@ export function startNextQueuedAuction(showId: string) {
     return undefined;
   }
 
-  if (existingAuction) {
+  if (existingAuction?.status === "live") {
     return null;
   }
+
+  if (existingAuction) {
+    delete mockAuctionsByShowId[showId];
+  }
+  delete mockRecentWinnerByShowId[showId];
+  delete mockLastAuctionSettlementByShowId[showId];
 
   const nextItem = getNextQueuedItem(showId);
   if (!nextItem) {
@@ -1183,7 +1294,7 @@ export function saveBuyerBidReadiness(input: {
   return readiness;
 }
 
-export function settleMockAuctionLot(input: { showId: string; userId: string; buyerName: string }) {
+export function settleMockAuctionLot(input: { showId: string; userId?: string; buyerName?: string }) {
   const show = mockShows.find((item) => item.id === input.showId);
   const auction = mockAuctionsByShowId[input.showId];
 
@@ -1195,7 +1306,7 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
     return null;
   }
 
-  if (!auction.highestBidderId || auction.highestBidderId !== input.userId) {
+  if (!auction.highestBidderId || !auction.highestBidderName) {
     return null;
   }
 
@@ -1204,9 +1315,11 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
     return null;
   }
 
-  const shipmentGroupId = `ship_group_${input.userId}_${input.showId}`;
+  const winnerUserId = auction.highestBidderId;
+  const winnerName = auction.highestBidderName;
+  const shipmentGroupId = `ship_group_${winnerUserId}_${input.showId}`;
   const existingShipmentGroup = mockShipmentGroups.find((group) => group.id === shipmentGroupId);
-  const readiness = getBuyerBidReadiness(input.userId);
+  const readiness = getBuyerBidReadiness(winnerUserId);
   const lotAmount = Number(auction.currentPrice.toFixed(2));
   const placedAt = new Date().toISOString();
 
@@ -1218,14 +1331,14 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
   } else {
     mockShipmentGroups.unshift({
       id: shipmentGroupId,
-      buyerId: input.userId,
+      buyerId: winnerUserId,
       sellerId: show.sellerId,
       sellerName: show.sellerName,
       showId: show.id,
       showTitle: show.title,
       shippingStatus: "open",
       lotCount: 1,
-      buyerName: input.buyerName,
+      buyerName: winnerName,
       itemTitles: [activeItem.title],
       totalAmount: lotAmount,
       shippingAmount: readiness.shippingPrice ?? 0,
@@ -1241,7 +1354,7 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
 
   const orderSummary: OrderSummary = {
     id: orderId,
-    buyerName: input.buyerName,
+    buyerName: winnerName,
     sellerName: show.sellerName,
     status: "paid",
     totalAmount: grandTotal,
@@ -1249,7 +1362,7 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
     placedAt,
     showId: show.id,
     showTitle: show.title,
-    buyerId: input.userId,
+    buyerId: winnerUserId,
     sellerId: show.sellerId,
     orderType: "won",
     itemTitles: [...shipmentGroup.itemTitles],
@@ -1291,23 +1404,32 @@ export function settleMockAuctionLot(input: { showId: string; userId: string; bu
   mockRecentWinnerByShowId[input.showId] = {
     itemId: activeItem.id,
     itemTitle: activeItem.title,
-    winnerName: input.buyerName,
+    winnerName: winnerName,
     amount: lotAmount,
     settledAt: placedAt
   };
   activeItem.lotStatus = "sold";
+  clearMaxBidsForItem(input.showId, auction.showItemId);
+  mockShowItemsByShowId[input.showId] = (mockShowItemsByShowId[input.showId] ?? [])
+    .filter((item) => item.id !== auction.showItemId)
+    .map((item, index) => ({
+      ...item,
+      queuePosition: index + 1
+    }));
   delete mockAuctionsByShowId[input.showId];
 
-  return {
+  const settlement: AuctionSettlementResult = {
     shipmentGroupId,
     shippingStatus: shipmentGroup.shippingStatus,
-    chargedAmount: grandTotal,
+    chargedAmount: lotAmount,
     currency: shipmentGroup.currency,
     order: {
       ...orderSummary,
       shipmentGroupLabel: `${shipmentGroup.showTitle} · ${shipmentGroup.lotCount} lots`
     }
   };
+  mockLastAuctionSettlementByShowId[input.showId] = settlement;
+  return settlement;
 }
 
 export function listBuyerOrders(userId?: string, sellerName?: string) {

@@ -12,6 +12,7 @@ import {
   listSellerShows,
   listShowQueue,
   moveQueueItem,
+  removeQueueItem,
   mockShows,
   searchCatalog,
   toggleShowLike,
@@ -87,11 +88,14 @@ export async function registerShowRoutes(app: FastifyInstance) {
 
     return {
       filters: query,
-      items: statusFiltered.map((item) => ({
-        ...item,
-        likeCount: countShowLikes(item.id),
-        likedByUser: isShowLikedByUser(item.id, query.userId)
-      }))
+      items: statusFiltered.map((item) => {
+        const detail = getShowDetail(item.id, query.userId);
+        return {
+          ...(detail ?? item),
+          likeCount: countShowLikes(item.id),
+          likedByUser: isShowLikedByUser(item.id, query.userId)
+        };
+      })
     };
   });
 
@@ -261,6 +265,24 @@ export async function registerShowRoutes(app: FastifyInstance) {
     return {
       showId: params.showId,
       items: moved
+    };
+  });
+
+  app.delete("/shows/:showId/queue/:itemId", async (request, reply) => {
+    const params = z.object({ showId: z.string(), itemId: z.string() }).parse(request.params);
+    const remaining = removeQueueItem({
+      showId: params.showId,
+      itemId: params.itemId
+    });
+
+    if (!remaining) {
+      reply.code(404);
+      return { message: "Queue item not found" };
+    }
+
+    return {
+      showId: params.showId,
+      items: remaining
     };
   });
 

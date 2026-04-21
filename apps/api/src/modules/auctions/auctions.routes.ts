@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   clearMaxBidForUser,
+  closeAndSettleMockAuctionLot,
   closeMockAuction,
   getAuctionByShowId,
   getBuyerBidReadiness,
@@ -39,8 +40,8 @@ const maxBidBodySchema = z.object({
 
 export async function registerAuctionRoutes(app: FastifyInstance) {
   const settleAuctionSchema = z.object({
-    userId: z.string().min(3),
-    buyerName: z.string().min(1)
+    userId: z.string().min(3).optional(),
+    buyerName: z.string().min(1).optional()
   });
 
   app.post("/auctions", async (request, reply) => {
@@ -136,14 +137,6 @@ export async function registerAuctionRoutes(app: FastifyInstance) {
   app.post("/shows/:showId/auction/settle", async (request, reply) => {
     const params = z.object({ showId: z.string() }).parse(request.params);
     const payload = settleAuctionSchema.parse(request.body);
-    const readiness = getBuyerBidReadiness(payload.userId);
-
-    if (!readiness.ready) {
-      reply.code(403);
-      return {
-        message: "Bid readiness required"
-      };
-    }
 
     const settlement = settleMockAuctionLot({
       showId: params.showId,
@@ -156,6 +149,33 @@ export async function registerAuctionRoutes(app: FastifyInstance) {
         reply.code(409);
         return {
           message: "Auction must be ended and settled by the current winner only."
+        };
+      }
+
+      reply.code(404);
+      return {
+        message: "Auction not found for settlement"
+      };
+    }
+
+    return settlement;
+  });
+
+  app.post("/shows/:showId/auction/close-and-settle", async (request, reply) => {
+    const params = z.object({ showId: z.string() }).parse(request.params);
+    const payload = settleAuctionSchema.parse(request.body);
+
+    const settlement = closeAndSettleMockAuctionLot({
+      showId: params.showId,
+      userId: payload.userId,
+      buyerName: payload.buyerName
+    });
+
+    if (!settlement) {
+      if (settlement === null) {
+        reply.code(409);
+        return {
+          message: "Auction could not be finalized."
         };
       }
 

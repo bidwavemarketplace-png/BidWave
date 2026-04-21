@@ -40,7 +40,13 @@ const userProfileSchema = z.object({
   preferredLocale: z.enum(["en", "sk", "cs"]).optional(),
   preferredCurrency: z.enum(["EUR", "CZK"]).optional(),
   onboardingCompleted: z.boolean().optional(),
-  profileImageUrl: z.string().optional()
+  profileImageUrl: z.string().optional(),
+  sellerType: z.enum(["trader", "non_trader"]).optional(),
+  businessName: z.string().optional(),
+  companyId: z.string().optional(),
+  vatId: z.string().optional(),
+  feeAcceptedAt: z.string().optional(),
+  sellerTermsAcceptedAt: z.string().optional()
 });
 
 export async function registerAuthRoutes(app: FastifyInstance) {

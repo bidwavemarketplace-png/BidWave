@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   applyOrderTrackingSnapshot,
+  confirmOrderDelivery,
   getOrderDetail,
   getOrderTracking,
   listBuyerOrders,
@@ -59,12 +60,17 @@ export async function registerOrderRoutes(app: FastifyInstance) {
     const query = z
       .object({
         userId: z.string().optional(),
+        buyerName: z.string().optional(),
         sellerName: z.string().optional()
       })
       .parse(request.query);
 
     return {
-      items: listBuyerOrders(query.userId, query.sellerName)
+      items: listBuyerOrders({
+        userId: query.userId,
+        buyerName: query.buyerName,
+        sellerName: query.sellerName
+      })
     };
   });
 
@@ -155,5 +161,26 @@ export async function registerOrderRoutes(app: FastifyInstance) {
     });
     applyOrderTrackingSnapshot(params.orderId, refreshed);
     return refreshed;
+  });
+
+  app.post("/orders/:orderId/confirm-delivery", async (request, reply) => {
+    const params = z.object({ orderId: z.string() }).parse(request.params);
+    const updated = confirmOrderDelivery(params.orderId);
+
+    if (!updated) {
+      reply.code(404);
+      return {
+        message: "Order not found"
+      };
+    }
+
+    return {
+      orderId: params.orderId,
+      status: "delivered",
+      trackingStatus: updated.trackingStatus,
+      trackingLastEvent: updated.trackingLastEvent,
+      trackingLastEventAt: updated.trackingLastEventAt,
+      sellerPayoutStatus: updated.sellerPayoutStatus
+    };
   });
 }

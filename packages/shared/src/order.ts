@@ -22,11 +22,18 @@ export type OrderSummary = {
   orderType?: "won" | "sold";
   itemTitles?: string[];
   shippingAmount?: number;
+  shippingMethodLabel?: string;
+  pickupPointId?: string;
+  pickupPointLabel?: string;
   trackingNumber?: string;
   deliveryProvider?: string;
   trackingStatus?: string;
   trackingLastEvent?: string;
   trackingLastEventAt?: string;
+  paymentStatus?: "pending_capture" | "captured" | "released_to_seller" | "refunded";
+  shipmentStatus?: "grouped_open" | "needs_shipping" | "tracking_added" | "delivered_confirmed";
+  sellerPayoutStatus?: "pending_payment" | "held" | "released";
+  shippingInstruction?: string;
 };
 
 export type OrderDetail = OrderSummary & {

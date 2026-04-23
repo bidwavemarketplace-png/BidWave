@@ -8,6 +8,9 @@ import type {
   ShowItemSummary,
   ShowSummary
 } from "@bidwave/shared";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import pg from "pg";
 
 const now = "2026-04-01T12:00:00.000Z";
 const LOT_DURATION_MS = 3 * 60 * 1000;
@@ -49,9 +52,16 @@ type ShipmentGroupSummary = {
   lotCount: number;
   buyerName: string;
   itemTitles: string[];
+  itemAmounts: number[];
   totalAmount: number;
   shippingAmount: number;
+  shippingMethodLabel?: string;
+  pickupPointId?: string;
+  pickupPointLabel?: string;
   currency: string;
+  paymentStatus: "pending_capture" | "captured" | "released_to_seller" | "refunded";
+  shipmentStatus: "grouped_open" | "needs_shipping" | "tracking_added" | "delivered_confirmed";
+  sellerPayoutStatus: "pending_payment" | "held" | "released";
   trackingNumber?: string;
   deliveryProvider?: string;
   trackingStatus?: string;
@@ -179,6 +189,157 @@ type ShipmentTrackingSnapshot = {
   source: "packeta_api" | "manual";
 };
 
+type PersistedOrderStore = {
+  orders?: OrderSummary[];
+  orderDetails?: Record<string, OrderDetail>;
+  shipmentGroups?: ShipmentGroupSummary[];
+  userProfiles?: UserProfileRecord[];
+  bidReadinessByUserId?: Record<string, BuyerBidReadiness>;
+};
+
+const postgresStoreKey = "orders:v1";
+let postgresPool: pg.Pool | null = null;
+let postgresStoreReady: Promise<pg.Pool | null> | null = null;
+
+const persistedStorePath =
+  process.env.BIDWAVE_STORE_PATH?.trim() ||
+  (process.env.DATA_DIR?.trim()
+    ? join(process.env.DATA_DIR.trim(), "bidwave-store.json")
+    : join(process.cwd(), ".bidwave-data", "bidwave-store.json"));
+
+function loadPersistedOrderStore(): PersistedOrderStore {
+  if (!persistedStorePath || !existsSync(persistedStorePath)) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(readFileSync(persistedStorePath, "utf8")) as PersistedOrderStore;
+  } catch {
+    return {};
+  }
+}
+
+function persistOrderStore() {
+  mkdirSync(dirname(persistedStorePath), { recursive: true });
+  const temporaryPath = `${persistedStorePath}.tmp`;
+  const payload = {
+    orders: mockOrders,
+    orderDetails: mockOrderDetails,
+    shipmentGroups: mockShipmentGroups,
+    userProfiles: mockUserProfiles,
+    bidReadinessByUserId: mockBidReadinessByUserId
+  } satisfies PersistedOrderStore;
+
+  writeFileSync(
+    temporaryPath,
+    JSON.stringify(payload, null, 2)
+  );
+  renameSync(temporaryPath, persistedStorePath);
+
+  void persistOrderStoreToPostgres(payload).catch((error) => {
+    console.error("Failed to persist BidWave order store to Postgres", error);
+  });
+}
+
+const persistedOrderStore = loadPersistedOrderStore();
+
+async function getPostgresStore() {
+  if (!process.env.DATABASE_URL?.trim()) {
+    return null;
+  }
+
+  if (!postgresStoreReady) {
+    postgresStoreReady = (async () => {
+      const pool = new pg.Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: process.env.DATABASE_SSL === "false" ? false : { rejectUnauthorized: false }
+      });
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bidwave_runtime_store (
+          store_key TEXT PRIMARY KEY,
+          payload JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      postgresPool = pool;
+      return pool;
+    })().catch((error) => {
+      postgresStoreReady = null;
+      console.error("Failed to initialize BidWave Postgres runtime store", error);
+      return null;
+    });
+  }
+
+  return postgresStoreReady;
+}
+
+function applyPersistedOrderStore(store: PersistedOrderStore) {
+  if (store.shipmentGroups) {
+    mockShipmentGroups.splice(0, mockShipmentGroups.length, ...store.shipmentGroups);
+  }
+
+  if (store.orders) {
+    mockOrders.splice(0, mockOrders.length, ...store.orders);
+  }
+
+  if (store.orderDetails) {
+    for (const key of Object.keys(mockOrderDetails)) {
+      delete mockOrderDetails[key];
+    }
+    Object.assign(mockOrderDetails, store.orderDetails);
+  }
+
+  if (store.userProfiles) {
+    mockUserProfiles.splice(0, mockUserProfiles.length, ...store.userProfiles);
+  }
+
+  if (store.bidReadinessByUserId) {
+    for (const key of Object.keys(mockBidReadinessByUserId)) {
+      delete mockBidReadinessByUserId[key];
+    }
+    Object.assign(mockBidReadinessByUserId, store.bidReadinessByUserId);
+  }
+}
+
+async function loadOrderStoreFromPostgres() {
+  const pool = await getPostgresStore();
+  if (!pool) {
+    return undefined;
+  }
+
+  const result = await pool.query<{ payload: PersistedOrderStore }>(
+    "SELECT payload FROM bidwave_runtime_store WHERE store_key = $1",
+    [postgresStoreKey]
+  );
+
+  return result.rows[0]?.payload;
+}
+
+async function persistOrderStoreToPostgres(payload: PersistedOrderStore) {
+  const pool = await getPostgresStore();
+  if (!pool) {
+    return;
+  }
+
+  await pool.query(
+    `
+      INSERT INTO bidwave_runtime_store (store_key, payload, updated_at)
+      VALUES ($1, $2::jsonb, NOW())
+      ON CONFLICT (store_key)
+      DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+    `,
+    [postgresStoreKey, JSON.stringify(payload)]
+  );
+}
+
+export async function initializePersistentOrderStore() {
+  const store = await loadOrderStoreFromPostgres();
+  if (store) {
+    applyPersistedOrderStore(store);
+  }
+}
+
 export const mockSellerApplications: SellerApplication[] = [
   {
     id: "sel_app_1",
@@ -256,18 +417,19 @@ const mockBidReadinessByUserId: Record<string, BuyerBidReadiness> = {
   "mobile-demo-user": {
     ready: false,
     status: "not_ready"
-  }
+  },
+  ...(persistedOrderStore.bidReadinessByUserId ?? {})
 };
 
 const mockMaxBidPreferences: MaxBidPreference[] = [];
 
-const mockShipmentGroups: ShipmentGroupSummary[] = [];
+const mockShipmentGroups: ShipmentGroupSummary[] = persistedOrderStore.shipmentGroups ?? [];
 const mockViewerPresence: ViewerPresence[] = [];
 const mockShowLikes: ShowLike[] = [];
 const mockBuyNowListings: BuyNowListing[] = [];
 const mockDirectMessages: DirectMessage[] = [];
 const mockPushTokenRegistrations: PushTokenRegistration[] = [];
-const mockUserProfiles: UserProfileRecord[] = [];
+const mockUserProfiles: UserProfileRecord[] = persistedOrderStore.userProfiles ?? [];
 
 function sanitizeUserProfile(profile: UserProfileRecord) {
   return Object.fromEntries(
@@ -289,35 +451,104 @@ function findShipmentGroupByOrderId(orderId: string) {
   return undefined;
 }
 
+function statusForShipmentGroup(group: ShipmentGroupSummary): OrderSummary["status"] {
+  if (group.shipmentStatus === "delivered_confirmed") {
+    return "delivered";
+  }
+
+  if (group.trackingNumber || group.shipmentStatus === "tracking_added") {
+    return "shipped";
+  }
+
+  if (group.paymentStatus === "captured") {
+    return "fulfillment_pending";
+  }
+
+  return "pending_payment";
+}
+
+function shippingInstructionForGroup(group: ShipmentGroupSummary) {
+  const destination = group.pickupPointLabel ? ` Buyer pickup point: ${group.pickupPointLabel}.` : "";
+  if (group.deliveryProvider === "packeta") {
+    return `Send via Packeta using the buyer default pickup/delivery option.${destination}`;
+  }
+
+  if (group.deliveryProvider === "balikovna") {
+    return `Send via Balíkovňa using the buyer default pickup/delivery option.${destination}`;
+  }
+
+  return `Use the buyer default shipping method, then add the tracking number here.${destination}`;
+}
+
 function syncShipmentGroupToOrders(group: ShipmentGroupSummary) {
   const soldOrderId = `sold_${group.id}`;
   const wonOrderId = `ord_${group.id}`;
+  const status = statusForShipmentGroup(group);
+  const totalAmount = Number((group.totalAmount + group.shippingAmount).toFixed(2));
 
-  for (const order of mockOrders) {
-    if (order.id !== soldOrderId && order.id !== wonOrderId) {
-      continue;
-    }
-
-    order.status = group.trackingNumber ? "shipped" : "fulfillment_pending";
+  const applySummary = (order: OrderSummary) => {
+    order.status = status;
+    order.totalAmount = totalAmount;
+    order.itemTitles = [...group.itemTitles];
+    order.shippingAmount = group.shippingAmount;
+    order.shippingMethodLabel = group.shippingMethodLabel;
+    order.pickupPointId = group.pickupPointId;
+    order.pickupPointLabel = group.pickupPointLabel;
     order.trackingNumber = group.trackingNumber;
     order.deliveryProvider = group.deliveryProvider;
     order.trackingStatus = group.trackingStatus;
     order.trackingLastEvent = group.trackingLastEvent;
     order.trackingLastEventAt = group.trackingLastEventAt;
+    order.paymentStatus = group.paymentStatus;
+    order.shipmentStatus = group.shipmentStatus;
+    order.sellerPayoutStatus = group.sellerPayoutStatus;
+    order.shippingInstruction = shippingInstructionForGroup(group);
+  };
+
+  for (const order of mockOrders) {
+    if (order.id === wonOrderId || order.id === soldOrderId) {
+      applySummary(order);
+    }
   }
 
   if (mockOrderDetails[wonOrderId]) {
     mockOrderDetails[wonOrderId] = {
       ...mockOrderDetails[wonOrderId],
-      shipmentStatus: group.trackingStatus ?? (group.trackingNumber ? "label_created" : "grouped_open"),
+      status,
+      totalAmount,
+      itemTitles: [...group.itemTitles],
+      shippingMethodLabel: group.shippingMethodLabel,
+      pickupPointId: group.pickupPointId,
+      pickupPointLabel: group.pickupPointLabel,
+      lineItems: [
+        ...group.itemTitles.map((title, index) => ({
+          title,
+          pricingMode: "auction" as const,
+          amount: group.itemAmounts[index] ?? 0
+        })),
+        ...(group.shippingAmount > 0
+          ? [
+              {
+                title: "Shipping",
+                pricingMode: "buy_now" as const,
+                amount: group.shippingAmount
+              }
+            ]
+          : [])
+      ],
+      paymentStatus: group.paymentStatus,
+      shipmentStatus: group.shipmentStatus,
       trackingNumber: group.trackingNumber,
       deliveryProvider: group.deliveryProvider,
       trackingStatus: group.trackingStatus,
       trackingLastEvent: group.trackingLastEvent,
-      trackingLastEventAt: group.trackingLastEventAt
+      trackingLastEventAt: group.trackingLastEventAt,
+      sellerPayoutStatus: group.sellerPayoutStatus,
+      shippingInstruction: shippingInstructionForGroup(group)
     } as OrderDetail;
   }
 }
+
 const mockRecentWinnerByShowId: Record<
   string,
   {
@@ -329,9 +560,9 @@ const mockRecentWinnerByShowId: Record<
   }
 > = {};
 
-export const mockOrders: OrderSummary[] = [];
+export const mockOrders: OrderSummary[] = persistedOrderStore.orders ?? [];
 
-const mockOrderDetails: Record<string, OrderDetail> = {};
+const mockOrderDetails: Record<string, OrderDetail> = persistedOrderStore.orderDetails ?? {};
 
 const normalizeProfileName = (value: string) => value.trim().toLowerCase();
 const directThreadParticipants = (left: string, right: string): [string, string] => {
@@ -497,6 +728,9 @@ export function endStream(showId: string) {
   if (auction) {
     auction.status = "ended";
     auction.endsAt = new Date().toISOString();
+    if (auction.highestBidderId && auction.highestBidderName) {
+      settleMockAuctionLot({ showId });
+    }
   }
 
   const activeItems = mockShowItemsByShowId[showId] ?? [];
@@ -505,6 +739,22 @@ export function endStream(showId: string) {
       item.lotStatus = "sold";
     }
   });
+
+  mockShipmentGroups
+    .filter((group) => group.showId === showId && group.paymentStatus === "pending_capture")
+    .forEach((group) => {
+      group.paymentStatus = "captured";
+      group.shipmentStatus = group.trackingNumber ? "tracking_added" : "needs_shipping";
+      group.sellerPayoutStatus = "held";
+      group.shippingStatus = "shipping_pending";
+      group.trackingStatus = group.trackingNumber ? (group.trackingStatus ?? "tracking_added") : "needs_shipping";
+      group.trackingLastEvent = group.trackingNumber
+        ? (group.trackingLastEvent ?? "Tracking number was added")
+        : "Payment captured after stream ended. Seller needs to ship.";
+      group.trackingLastEventAt = new Date().toISOString();
+      syncShipmentGroupToOrders(group);
+    });
+  persistOrderStore();
 
   return show;
 }
@@ -527,7 +777,7 @@ export function goLive(showId: string) {
 }
 
 export function listSellerOrders(sellerName: string) {
-  return listBuyerOrders(undefined, sellerName);
+  return listBuyerOrders({ sellerName });
 }
 
 export function getShowDetail(
@@ -542,7 +792,9 @@ export function getShowDetail(
     return undefined;
   }
 
-  const streamGroups = mockShipmentGroups.filter((group) => group.showId === showId);
+  const streamGroups = mockShipmentGroups.filter(
+    (group) => group.showId === showId && group.paymentStatus !== "pending_capture"
+  );
   const grossRevenue = streamGroups.reduce((sum, group) => sum + group.totalAmount, 0);
 
   return {
@@ -1248,10 +1500,12 @@ export function saveUserProfile(input: UserProfileRecord) {
   const existing = mockUserProfiles.find((item) => item.uid === input.uid);
   if (existing) {
     Object.assign(existing, sanitized);
+    persistOrderStore();
     return existing;
   }
 
   mockUserProfiles.push(sanitized);
+  persistOrderStore();
   return sanitized;
 }
 
@@ -1262,6 +1516,8 @@ export function deleteUserProfile(uid: string) {
   }
 
   const [removed] = mockUserProfiles.splice(index, 1);
+  delete mockBidReadinessByUserId[uid];
+  persistOrderStore();
   return removed;
 }
 
@@ -1335,6 +1591,7 @@ export function saveBuyerBidReadiness(input: {
   };
 
   mockBidReadinessByUserId[input.userId] = readiness;
+  persistOrderStore();
   return readiness;
 }
 
@@ -1370,6 +1627,7 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
   if (existingShipmentGroup) {
     existingShipmentGroup.lotCount += 1;
     existingShipmentGroup.itemTitles.push(activeItem.title);
+    existingShipmentGroup.itemAmounts.push(lotAmount);
     existingShipmentGroup.totalAmount = Number((existingShipmentGroup.totalAmount + lotAmount).toFixed(2));
     existingShipmentGroup.placedAt = placedAt;
   } else {
@@ -1384,9 +1642,16 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
       lotCount: 1,
       buyerName: winnerName,
       itemTitles: [activeItem.title],
+      itemAmounts: [lotAmount],
       totalAmount: lotAmount,
       shippingAmount: readiness.shippingPrice ?? 0,
+      shippingMethodLabel: readiness.shippingMethodLabel,
+      pickupPointId: readiness.pickupPointId,
+      pickupPointLabel: readiness.pickupPointLabel,
       currency: activeItem.currency ?? "EUR",
+      paymentStatus: "pending_capture",
+      shipmentStatus: "grouped_open",
+      sellerPayoutStatus: "pending_payment",
       deliveryProvider: readiness.shippingProvider,
       placedAt
     });
@@ -1400,7 +1665,7 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
     id: orderId,
     buyerName: winnerName,
     sellerName: show.sellerName,
-    status: "paid",
+    status: statusForShipmentGroup(shipmentGroup),
     totalAmount: grandTotal,
     currency: shipmentGroup.currency,
     placedAt,
@@ -1411,11 +1676,18 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
     orderType: "won",
     itemTitles: [...shipmentGroup.itemTitles],
     shippingAmount: shipmentGroup.shippingAmount,
+    shippingMethodLabel: shipmentGroup.shippingMethodLabel,
+    pickupPointId: shipmentGroup.pickupPointId,
+    pickupPointLabel: shipmentGroup.pickupPointLabel,
     trackingNumber: shipmentGroup.trackingNumber,
     deliveryProvider: shipmentGroup.deliveryProvider,
     trackingStatus: shipmentGroup.trackingStatus,
     trackingLastEvent: shipmentGroup.trackingLastEvent,
-    trackingLastEventAt: shipmentGroup.trackingLastEventAt
+    trackingLastEventAt: shipmentGroup.trackingLastEventAt,
+    paymentStatus: shipmentGroup.paymentStatus,
+    shipmentStatus: shipmentGroup.shipmentStatus,
+    sellerPayoutStatus: shipmentGroup.sellerPayoutStatus,
+    shippingInstruction: shippingInstructionForGroup(shipmentGroup)
   };
 
   const orderDetail: OrderDetail = {
@@ -1424,10 +1696,10 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
     lineItems: shipmentGroup.itemTitles.map((title, index) => ({
       title,
       pricingMode: "auction",
-      amount: index === shipmentGroup.itemTitles.length - 1 ? lotAmount : 0
+      amount: shipmentGroup.itemAmounts[index] ?? (index === shipmentGroup.itemTitles.length - 1 ? lotAmount : 0)
     })),
-    paymentStatus: "captured",
-    shipmentStatus: "grouped_open"
+    paymentStatus: shipmentGroup.paymentStatus,
+    shipmentStatus: shipmentGroup.shipmentStatus
   };
 
   if (shipmentGroup.shippingAmount > 0) {
@@ -1445,6 +1717,8 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
     mockOrders.unshift(orderSummary);
   }
   mockOrderDetails[orderId] = orderDetail;
+  syncShipmentGroupToOrders(shipmentGroup);
+  persistOrderStore();
   mockRecentWinnerByShowId[input.showId] = {
     itemId: activeItem.id,
     itemTitle: activeItem.title,
@@ -1476,54 +1750,95 @@ export function settleMockAuctionLot(input: { showId: string; userId?: string; b
   return settlement;
 }
 
-export function listBuyerOrders(userId?: string, sellerName?: string) {
-  const wonOrders = mockOrders.filter((order) => {
-    if (userId && order.buyerId !== userId) {
+export function listBuyerOrders(input: { userId?: string; buyerName?: string; sellerName?: string } = {}) {
+  const normalizedBuyerName = input.buyerName?.trim().toLowerCase();
+  const hasBuyerFilter = Boolean(input.userId || normalizedBuyerName);
+  const buyerMatches = (order: Pick<OrderSummary, "buyerId" | "buyerName">) => {
+    if (!hasBuyerFilter) {
       return false;
     }
 
-    if (sellerName && order.sellerName !== sellerName) {
+    if (input.userId && order.buyerId === input.userId) {
+      return true;
+    }
+
+    return Boolean(normalizedBuyerName && order.buyerName.trim().toLowerCase() === normalizedBuyerName);
+  };
+  const shipmentGroupToOrder = (group: ShipmentGroupSummary, orderType: "won" | "sold"): OrderSummary => ({
+    id: `${orderType === "sold" ? "sold" : "ord"}_${group.id}`,
+    buyerName: group.buyerName,
+    sellerName: group.sellerName,
+    status: statusForShipmentGroup(group),
+    totalAmount: Number((group.totalAmount + group.shippingAmount).toFixed(2)),
+    currency: group.currency,
+    placedAt: group.placedAt,
+    showId: group.showId,
+    showTitle: group.showTitle,
+    buyerId: group.buyerId,
+    sellerId: group.sellerId,
+    orderType,
+    itemTitles: [...group.itemTitles],
+    shippingAmount: group.shippingAmount,
+    shippingMethodLabel: group.shippingMethodLabel,
+    pickupPointId: group.pickupPointId,
+    pickupPointLabel: group.pickupPointLabel,
+    trackingNumber: group.trackingNumber,
+    deliveryProvider: group.deliveryProvider,
+    trackingStatus: group.trackingStatus,
+    trackingLastEvent: group.trackingLastEvent,
+    trackingLastEventAt: group.trackingLastEventAt,
+    paymentStatus: group.paymentStatus,
+    shipmentStatus: group.shipmentStatus,
+    sellerPayoutStatus: group.sellerPayoutStatus,
+    shippingInstruction: shippingInstructionForGroup(group)
+  });
+
+  const wonOrders = mockOrders.filter((order) => {
+    if (order.paymentStatus === "pending_capture") {
+      return false;
+    }
+
+    if (hasBuyerFilter && !buyerMatches(order)) {
+      return false;
+    }
+
+    if (!hasBuyerFilter && input.sellerName && order.sellerName !== input.sellerName) {
       return false;
     }
 
     return true;
   });
 
+  const wonShipmentOrders = hasBuyerFilter
+    ? mockShipmentGroups
+        .filter((group) => group.paymentStatus !== "pending_capture" && buyerMatches(group))
+        .map((group) => shipmentGroupToOrder(group, "won"))
+    : [];
+
   const soldOrders = mockShipmentGroups
     .filter((group) => {
-      if (sellerName) {
-        return group.sellerName === sellerName;
+      if (group.paymentStatus === "pending_capture") {
+        return false;
       }
 
-      if (userId) {
-        return group.sellerId === userId;
+      if (input.sellerName) {
+        return group.sellerName === input.sellerName;
+      }
+
+      if (hasBuyerFilter) {
+        return buyerMatches(group);
       }
 
       return true;
     })
-    .map<OrderSummary>((group) => ({
-      id: `sold_${group.id}`,
-      buyerName: group.buyerName,
-      sellerName: group.sellerName,
-      status: group.trackingNumber ? "shipped" : "fulfillment_pending",
-      totalAmount: Number((group.totalAmount + group.shippingAmount).toFixed(2)),
-      currency: group.currency,
-      placedAt: group.placedAt,
-      showId: group.showId,
-      showTitle: group.showTitle,
-      buyerId: group.buyerId,
-      sellerId: group.sellerId,
-      orderType: "sold",
-      itemTitles: [...group.itemTitles],
-      shippingAmount: group.shippingAmount,
-      trackingNumber: group.trackingNumber,
-      deliveryProvider: group.deliveryProvider,
-      trackingStatus: group.trackingStatus,
-      trackingLastEvent: group.trackingLastEvent,
-      trackingLastEventAt: group.trackingLastEventAt
-    }));
+    .map<OrderSummary>((group) => shipmentGroupToOrder(group, "sold"));
 
-  return [...wonOrders, ...soldOrders].sort(
+  const dedupedOrders = new Map<string, OrderSummary>();
+  [...wonOrders, ...wonShipmentOrders, ...soldOrders].forEach((order) => {
+    dedupedOrders.set(order.id, order);
+  });
+
+  return [...dedupedOrders.values()].sort(
     (left, right) => new Date(right.placedAt).getTime() - new Date(left.placedAt).getTime()
   );
 }
@@ -1544,10 +1859,15 @@ export function saveOrderTracking(input: {
 
   shipmentGroup.trackingNumber = input.trackingNumber.trim();
   shipmentGroup.deliveryProvider = input.provider;
+  shipmentGroup.shipmentStatus = "tracking_added";
   shipmentGroup.trackingStatus = "tracking_added";
-  shipmentGroup.trackingLastEvent = "Tracking number was added";
+  shipmentGroup.trackingLastEvent =
+    shipmentGroup.paymentStatus === "captured"
+      ? "Tracking number was added. Waiting for buyer delivery confirmation."
+      : "Tracking number was added";
   shipmentGroup.trackingLastEventAt = new Date().toISOString();
   syncShipmentGroupToOrders(shipmentGroup);
+  persistOrderStore();
 
   return shipmentGroup;
 }
@@ -1577,10 +1897,31 @@ export function applyOrderTrackingSnapshot(orderId: string, snapshot: ShipmentTr
 
   shipmentGroup.deliveryProvider = snapshot.provider;
   shipmentGroup.trackingNumber = snapshot.trackingNumber;
+  shipmentGroup.shipmentStatus = "tracking_added";
   shipmentGroup.trackingStatus = snapshot.status;
   shipmentGroup.trackingLastEvent = snapshot.lastEvent;
   shipmentGroup.trackingLastEventAt = snapshot.lastEventAt ?? snapshot.updatedAt;
   syncShipmentGroupToOrders(shipmentGroup);
+  persistOrderStore();
+
+  return shipmentGroup;
+}
+
+export function confirmOrderDelivery(orderId: string) {
+  const shipmentGroup = findShipmentGroupByOrderId(orderId);
+  if (!shipmentGroup) {
+    return undefined;
+  }
+
+  shipmentGroup.shippingStatus = "shipping_paid";
+  shipmentGroup.paymentStatus = "released_to_seller";
+  shipmentGroup.shipmentStatus = "delivered_confirmed";
+  shipmentGroup.sellerPayoutStatus = "released";
+  shipmentGroup.trackingStatus = "delivered_confirmed";
+  shipmentGroup.trackingLastEvent = "Buyer confirmed delivery. Seller payout released.";
+  shipmentGroup.trackingLastEventAt = new Date().toISOString();
+  syncShipmentGroupToOrders(shipmentGroup);
+  persistOrderStore();
 
   return shipmentGroup;
 }

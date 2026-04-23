@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  createBuyNowOffer,
   createBuyNowListing,
   createSellerApplication,
   deleteBuyNowListing,
@@ -13,6 +14,7 @@ import {
   listSellerOrders,
   listSellerShows,
   registerPushToken,
+  respondToBuyNowOffer,
   sendDirectMessage
 } from "../../data/mock-store";
 
@@ -30,6 +32,18 @@ const createBuyNowSchema = z.object({
   price: z.number().positive(),
   currency: z.enum(["EUR", "CZK"]).optional(),
   imageUrl: z.string().optional()
+});
+
+const createBuyNowOfferSchema = z.object({
+  listingId: z.string().min(1),
+  buyerId: z.string().min(1).optional(),
+  buyerName: z.string().min(2),
+  offerPrice: z.number().positive()
+});
+
+const respondBuyNowOfferSchema = z.object({
+  sellerName: z.string().min(2),
+  decision: z.enum(["approve", "reject"])
 });
 
 const directMessageQuerySchema = z.object({
@@ -131,6 +145,72 @@ export async function registerSellerRoutes(app: FastifyInstance) {
     }
 
     return removed;
+  });
+
+  app.post("/buy-now/offers", async (request, reply) => {
+    const payload = createBuyNowOfferSchema.parse(request.body);
+    const created = createBuyNowOffer(payload);
+    if (!created) {
+      reply.code(404);
+      return { message: "Listing not found" };
+    }
+
+    if (created === null) {
+      reply.code(400);
+      return { message: "Offer must be greater than zero and cannot exceed the buy now price." };
+    }
+
+    const recipientTokens = listPushTokensForProfile(created.sellerName);
+    await sendExpoPushNotification({
+      to: recipientTokens,
+      title: created.buyerName.trim(),
+      body: `Offer for ${created.productTitle}: ${created.offerPrice.toFixed(2)} ${created.currency}`,
+      data: {
+        kind: "direct-message",
+        counterpartName: created.buyerName.trim(),
+        offerId: created.id
+      }
+    });
+
+    reply.code(201);
+    return created;
+  });
+
+  app.post("/buy-now/offers/:offerId/respond", async (request, reply) => {
+    const params = z.object({ offerId: z.string().min(1) }).parse(request.params);
+    const payload = respondBuyNowOfferSchema.parse(request.body);
+    const updated = respondToBuyNowOffer({
+      offerId: params.offerId,
+      sellerName: payload.sellerName,
+      decision: payload.decision
+    });
+
+    if (!updated) {
+      reply.code(404);
+      return { message: "Offer not found" };
+    }
+
+    if (updated === null) {
+      reply.code(403);
+      return { message: "Only the seller can respond to this offer." };
+    }
+
+    const recipientTokens = listPushTokensForProfile(updated.buyerName);
+    await sendExpoPushNotification({
+      to: recipientTokens,
+      title: updated.sellerName,
+      body:
+        updated.status === "approved"
+          ? `Offer approved for ${updated.productTitle}`
+          : `Offer rejected for ${updated.productTitle}`,
+      data: {
+        kind: "direct-message",
+        counterpartName: updated.sellerName,
+        offerId: updated.id
+      }
+    });
+
+    return updated;
   });
 
   app.get("/direct-messages", async (request) => {

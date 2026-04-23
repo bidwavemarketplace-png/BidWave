@@ -127,6 +127,31 @@ type BuyNowListing = {
   createdAt: string;
 };
 
+type BuyNowOfferStatus = "pending" | "approved" | "rejected";
+
+type BuyNowOffer = {
+  id: string;
+  listingId: string;
+  sellerName: string;
+  buyerId?: string;
+  buyerName: string;
+  productTitle: string;
+  originalPrice: number;
+  offerPrice: number;
+  currency: string;
+  status: BuyNowOfferStatus;
+  createdAt: string;
+  respondedAt?: string;
+  orderId?: string;
+};
+
+type DirectMessageMetadata =
+  | {
+      kind: "buy_now_offer";
+      offerId: string;
+    }
+  | undefined;
+
 type DirectMessage = {
   id: string;
   participants: [string, string];
@@ -135,6 +160,7 @@ type DirectMessage = {
   recipientProfile: string;
   text: string;
   createdAt: string;
+  metadata?: DirectMessageMetadata;
 };
 
 type PushTokenRegistration = {
@@ -195,6 +221,10 @@ type PersistedOrderStore = {
   shipmentGroups?: ShipmentGroupSummary[];
   userProfiles?: UserProfileRecord[];
   bidReadinessByUserId?: Record<string, BuyerBidReadiness>;
+  buyNowListings?: BuyNowListing[];
+  buyNowOffers?: BuyNowOffer[];
+  directMessages?: DirectMessage[];
+  pushTokenRegistrations?: PushTokenRegistration[];
 };
 
 const postgresStoreKey = "orders:v1";
@@ -227,7 +257,11 @@ function persistOrderStore() {
     orderDetails: mockOrderDetails,
     shipmentGroups: mockShipmentGroups,
     userProfiles: mockUserProfiles,
-    bidReadinessByUserId: mockBidReadinessByUserId
+    bidReadinessByUserId: mockBidReadinessByUserId,
+    buyNowListings: mockBuyNowListings,
+    buyNowOffers: mockBuyNowOffers,
+    directMessages: mockDirectMessages,
+    pushTokenRegistrations: mockPushTokenRegistrations
   } satisfies PersistedOrderStore;
 
   writeFileSync(
@@ -299,6 +333,22 @@ function applyPersistedOrderStore(store: PersistedOrderStore) {
       delete mockBidReadinessByUserId[key];
     }
     Object.assign(mockBidReadinessByUserId, store.bidReadinessByUserId);
+  }
+
+  if (store.buyNowListings) {
+    mockBuyNowListings.splice(0, mockBuyNowListings.length, ...store.buyNowListings);
+  }
+
+  if (store.buyNowOffers) {
+    mockBuyNowOffers.splice(0, mockBuyNowOffers.length, ...store.buyNowOffers);
+  }
+
+  if (store.directMessages) {
+    mockDirectMessages.splice(0, mockDirectMessages.length, ...store.directMessages);
+  }
+
+  if (store.pushTokenRegistrations) {
+    mockPushTokenRegistrations.splice(0, mockPushTokenRegistrations.length, ...store.pushTokenRegistrations);
   }
 }
 
@@ -426,9 +476,10 @@ const mockMaxBidPreferences: MaxBidPreference[] = [];
 const mockShipmentGroups: ShipmentGroupSummary[] = persistedOrderStore.shipmentGroups ?? [];
 const mockViewerPresence: ViewerPresence[] = [];
 const mockShowLikes: ShowLike[] = [];
-const mockBuyNowListings: BuyNowListing[] = [];
-const mockDirectMessages: DirectMessage[] = [];
-const mockPushTokenRegistrations: PushTokenRegistration[] = [];
+const mockBuyNowListings: BuyNowListing[] = persistedOrderStore.buyNowListings ?? [];
+const mockBuyNowOffers: BuyNowOffer[] = persistedOrderStore.buyNowOffers ?? [];
+const mockDirectMessages: DirectMessage[] = persistedOrderStore.directMessages ?? [];
+const mockPushTokenRegistrations: PushTokenRegistration[] = persistedOrderStore.pushTokenRegistrations ?? [];
 const mockUserProfiles: UserProfileRecord[] = persistedOrderStore.userProfiles ?? [];
 
 function sanitizeUserProfile(profile: UserProfileRecord) {
@@ -1345,6 +1396,7 @@ export function createBuyNowListing(input: {
   };
 
   mockBuyNowListings.unshift(created);
+  persistOrderStore();
   return created;
 }
 
@@ -1355,7 +1407,205 @@ export function deleteBuyNowListing(listingId: string) {
   }
 
   const [removed] = mockBuyNowListings.splice(index, 1);
+  persistOrderStore();
   return removed;
+}
+
+function buyNowOfferText(offer: BuyNowOffer, status: BuyNowOfferStatus = offer.status) {
+  if (status === "approved") {
+    return `Offer approved for "${offer.productTitle}". Original: ${offer.originalPrice.toFixed(2)} ${offer.currency}. Approved price: ${offer.offerPrice.toFixed(2)} ${offer.currency}.`;
+  }
+
+  if (status === "rejected") {
+    return `Offer rejected for "${offer.productTitle}". Original: ${offer.originalPrice.toFixed(2)} ${offer.currency}. Offered price: ${offer.offerPrice.toFixed(2)} ${offer.currency}.`;
+  }
+
+  return `Buy now offer for "${offer.productTitle}". Original price: ${offer.originalPrice.toFixed(2)} ${offer.currency}. Offer: ${offer.offerPrice.toFixed(2)} ${offer.currency}.`;
+}
+
+function decorateDirectMessage(message: DirectMessage) {
+  if (message.metadata?.kind !== "buy_now_offer") {
+    return message;
+  }
+
+  const offer = mockBuyNowOffers.find((item) => item.id === message.metadata?.offerId);
+  return {
+    ...message,
+    offer
+  };
+}
+
+function createBuyNowOrderFromOffer(offer: BuyNowOffer) {
+  const placedAt = new Date().toISOString();
+  const buyerId = offer.buyerId?.trim() || normalizeProfileName(offer.buyerName);
+  const readiness = getBuyerBidReadiness(buyerId);
+  const shipmentGroupId = `ship_group_${buyerId}_buy_now_${offer.listingId}`;
+  const existingShipmentGroup = mockShipmentGroups.find((group) => group.id === shipmentGroupId);
+
+  if (existingShipmentGroup) {
+    return `ord_${shipmentGroupId}`;
+  }
+
+  mockShipmentGroups.unshift({
+    id: shipmentGroupId,
+    buyerId,
+    sellerId: normalizeProfileName(offer.sellerName),
+    sellerName: offer.sellerName,
+    showId: `buy_now_${offer.listingId}`,
+    showTitle: `Buy now · ${offer.productTitle}`,
+    shippingStatus: "open",
+    lotCount: 1,
+    buyerName: offer.buyerName,
+    itemTitles: [offer.productTitle],
+    itemAmounts: [offer.offerPrice],
+    totalAmount: offer.offerPrice,
+    shippingAmount: readiness.shippingPrice ?? 0,
+    shippingMethodLabel: readiness.shippingMethodLabel,
+    pickupPointId: readiness.pickupPointId,
+    pickupPointLabel: readiness.pickupPointLabel,
+    currency: offer.currency,
+    paymentStatus: "captured",
+    shipmentStatus: "needs_shipping",
+    sellerPayoutStatus: "held",
+    deliveryProvider: readiness.shippingProvider,
+    placedAt
+  });
+
+  const shipmentGroup = mockShipmentGroups.find((group) => group.id === shipmentGroupId)!;
+  const orderId = `ord_${shipmentGroupId}`;
+  const grandTotal = Number((shipmentGroup.totalAmount + shipmentGroup.shippingAmount).toFixed(2));
+  const orderSummary: OrderSummary = {
+    id: orderId,
+    buyerName: offer.buyerName,
+    sellerName: offer.sellerName,
+    status: statusForShipmentGroup(shipmentGroup),
+    totalAmount: grandTotal,
+    currency: offer.currency,
+    placedAt,
+    showId: shipmentGroup.showId,
+    showTitle: shipmentGroup.showTitle,
+    buyerId,
+    sellerId: shipmentGroup.sellerId,
+    orderType: "won",
+    itemTitles: [offer.productTitle],
+    shippingAmount: shipmentGroup.shippingAmount,
+    shippingMethodLabel: shipmentGroup.shippingMethodLabel,
+    pickupPointId: shipmentGroup.pickupPointId,
+    pickupPointLabel: shipmentGroup.pickupPointLabel,
+    paymentStatus: shipmentGroup.paymentStatus,
+    shipmentStatus: shipmentGroup.shipmentStatus,
+    sellerPayoutStatus: shipmentGroup.sellerPayoutStatus,
+    shippingInstruction: shippingInstructionForGroup(shipmentGroup)
+  };
+
+  mockOrders.unshift(orderSummary);
+  mockOrderDetails[orderId] = {
+    ...orderSummary,
+    showTitle: shipmentGroup.showTitle,
+    lineItems: [
+      {
+        title: offer.productTitle,
+        pricingMode: "buy_now",
+        amount: offer.offerPrice
+      }
+    ],
+    paymentStatus: shipmentGroup.paymentStatus,
+    shipmentStatus: shipmentGroup.shipmentStatus
+  };
+
+  if (shipmentGroup.shippingAmount > 0) {
+    mockOrderDetails[orderId].lineItems.push({
+      title: "Shipping",
+      pricingMode: "buy_now",
+      amount: shipmentGroup.shippingAmount
+    });
+  }
+
+  syncShipmentGroupToOrders(shipmentGroup);
+  return orderId;
+}
+
+export function createBuyNowOffer(input: {
+  listingId: string;
+  buyerId?: string;
+  buyerName: string;
+  offerPrice: number;
+}) {
+  const listing = mockBuyNowListings.find((item) => item.id === input.listingId);
+  if (!listing) {
+    return undefined;
+  }
+
+  if (input.offerPrice <= 0 || input.offerPrice > listing.price) {
+    return null;
+  }
+
+  const created: BuyNowOffer = {
+    id: `offer_${Date.now()}`,
+    listingId: listing.id,
+    sellerName: listing.sellerName,
+    buyerId: input.buyerId,
+    buyerName: input.buyerName.trim(),
+    productTitle: listing.title,
+    originalPrice: listing.price,
+    offerPrice: Number(input.offerPrice.toFixed(2)),
+    currency: listing.currency,
+    status: "pending",
+    createdAt: new Date().toISOString()
+  };
+
+  mockBuyNowOffers.unshift(created);
+  sendDirectMessage({
+    from: created.buyerName,
+    to: created.sellerName,
+    text: buyNowOfferText(created),
+    metadata: {
+      kind: "buy_now_offer",
+      offerId: created.id
+    }
+  });
+  persistOrderStore();
+  return created;
+}
+
+export function respondToBuyNowOffer(input: {
+  offerId: string;
+  sellerName: string;
+  decision: "approve" | "reject";
+}) {
+  const offer = mockBuyNowOffers.find((item) => item.id === input.offerId);
+  if (!offer) {
+    return undefined;
+  }
+
+  if (normalizeProfileName(offer.sellerName) !== normalizeProfileName(input.sellerName)) {
+    return null;
+  }
+
+  if (offer.status !== "pending") {
+    return offer;
+  }
+
+  offer.status = input.decision === "approve" ? "approved" : "rejected";
+  offer.respondedAt = new Date().toISOString();
+
+  if (offer.status === "approved") {
+    offer.orderId = createBuyNowOrderFromOffer(offer);
+    deleteBuyNowListing(offer.listingId);
+  }
+
+  sendDirectMessage({
+    from: offer.sellerName,
+    to: offer.buyerName,
+    text: buyNowOfferText(offer, offer.status),
+    metadata: {
+      kind: "buy_now_offer",
+      offerId: offer.id
+    }
+  });
+
+  persistOrderStore();
+  return offer;
 }
 
 export function listDirectMessageThreads(profileName: string) {
@@ -1377,7 +1627,7 @@ export function listDirectMessageThreads(profileName: string) {
       const threadKey = directThreadParticipants(normalizedProfileName, counterpartName).join("::");
       const existing = threads.get(threadKey) ?? { counterpartName, messages: [] as DirectMessage[] };
       existing.messages.push(message);
-      existing.lastMessage = message;
+      existing.lastMessage = decorateDirectMessage(message);
       threads.set(threadKey, existing);
     });
 
@@ -1401,13 +1651,13 @@ export function listDirectMessages(profileName: string, counterpartName: string)
       (message) => message.participants[0] === participants[0] && message.participants[1] === participants[1]
     )
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
-    .map((message) => ({
+    .map((message) => decorateDirectMessage({
       ...message,
       author: message.author
     }));
 }
 
-export function sendDirectMessage(input: { from: string; to: string; text: string }) {
+export function sendDirectMessage(input: { from: string; to: string; text: string; metadata?: DirectMessageMetadata }) {
   const participants = directThreadParticipants(input.from, input.to);
   const created: DirectMessage = {
     id: `dm_${Date.now()}`,
@@ -1416,10 +1666,12 @@ export function sendDirectMessage(input: { from: string; to: string; text: strin
     authorProfile: normalizeProfileName(input.from),
     recipientProfile: input.to.trim(),
     text: input.text,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    metadata: input.metadata
   };
 
   mockDirectMessages.push(created);
+  persistOrderStore();
   return created;
 }
 
